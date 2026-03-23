@@ -102,11 +102,11 @@ jobs:
             ```bash
             # Download for your architecture (example: amd64):
             curl -Lo /usr/local/bin/bytes-dns \
-              https://github.com/bytesbytes/bytes-dns/releases/download/${{ github.ref_name }}/bytes-dns-linux-amd64
+              https://github.com/bytes-commerce/bytes-dns/releases/download/${{ github.ref_name }}/bytes-dns-linux-amd64
             chmod +x /usr/local/bin/bytes-dns
 
             # Or clone and install with systemd:
-            git clone https://github.com/bytesbytes/bytes-dns
+            git clone https://github.com/bytes-commerce/bytes-dns
             cd bytes-dns
             sudo bash install.sh
             ```
@@ -117,7 +117,7 @@ jobs:
             sha256sum -c checksums.txt
             ```
 
-            See [README.md](https://github.com/bytesbytes/bytes-dns#readme) for full documentation.
+            See [README.md](https://github.com/bytes-commerce/bytes-dns#readme) for full documentation.
           files: |
             dist/bytes-dns-linux-amd64
             dist/bytes-dns-linux-arm64

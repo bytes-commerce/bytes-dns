@@ -79,7 +79,7 @@ VERSION=v1.0.0
 ARCH=linux-amd64
 
 curl -Lo /usr/local/bin/bytes-dns \
-  "https://github.com/bytesbytes/bytes-dns/releases/download/${VERSION}/bytes-dns-${ARCH}"
+  "https://github.com/bytes-commerce/bytes-dns/releases/download/${VERSION}/bytes-dns-${ARCH}"
 chmod +x /usr/local/bin/bytes-dns
 
 # Verify
@@ -91,7 +91,7 @@ Then follow the [Configuration](#configuration) and [systemd Setup](#systemd-set
 ### From source
 
 ```bash
-git clone https://github.com/bytesbytes/bytes-dns
+git clone https://github.com/bytes-commerce/bytes-dns
 cd bytes-dns
 
 # Build and install binary + systemd units in one step:

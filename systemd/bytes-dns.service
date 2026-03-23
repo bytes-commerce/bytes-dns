@@ -1,6 +1,6 @@
 [Unit]
 Description=bytes-dns - updater for Hetzner DNS
-Documentation=https://github.com/bytesbytes/bytes-dns
+Documentation=https://github.com/bytes-commerce/bytes-dns
 After=network-online.target
 Wants=network-online.target
 

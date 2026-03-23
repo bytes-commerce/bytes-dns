@@ -71,7 +71,7 @@ func (d *Detector) fetch(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("cannot build request to %s: %w", d.source, err)
 	}
-	req.Header.Set("User-Agent", "bytes-dns/1.0 (+https://github.com/bytesbytes/bytes-dns)")
+	req.Header.Set("User-Agent", "bytes-dns/1.0 (+https://github.com/bytes-commerce/bytes-dns)")
 	req.Header.Set("Accept", "text/plain")
 
 	resp, err := d.client.Do(req)

@@ -1,6 +1,6 @@
 [Unit]
 Description=bytes-dns timer - run the updater periodically for Hetzner DNS
-Documentation=https://github.com/bytesbytes/bytes-dns
+Documentation=https://github.com/bytes-commerce/bytes-dns
 Requires=bytes-dns@%i.service
 
 [Timer]

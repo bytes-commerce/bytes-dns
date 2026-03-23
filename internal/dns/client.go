@@ -157,7 +157,7 @@ func (c *Client) sendJSON(ctx context.Context, method, endpoint string, body, ou
 func (c *Client) setHeaders(req *http.Request) {
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "bytes-dns/1.0 (+https://github.com/bytesbytes/bytes-dns)")
+	req.Header.Set("User-Agent", "bytes-dns/1.0 (+https://github.com/bytes-commerce/bytes-dns)")
 }
 
 func (c *Client) do(req *http.Request, out any) error {
