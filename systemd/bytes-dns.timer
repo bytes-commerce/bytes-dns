@@ -1,0 +1,14 @@
+[Unit]
+Description=bytes-dns timer - run the updater periodically for Hetzner DNS
+Documentation=https://github.com/bytesbytes/bytes-dns
+Requires=bytes-dns@%i.service
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=INTERVAL_PLACEHOLDER
+RandomizedDelaySec=30
+Persistent=true
+Unit=bytes-dns@%i.service
+
+[Install]
+WantedBy=timers.target

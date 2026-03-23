@@ -1,0 +1,38 @@
+[Unit]
+Description=bytes-dns - updater for Hetzner DNS
+Documentation=https://github.com/bytesbytes/bytes-dns
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Run as the user that has ~/.bytes-dns/config.json.
+# Change User= to root only if you installed config under /root.
+User=%i
+Group=%i
+
+ExecStart=/usr/local/bin/bytes-dns run
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.bytes-dns
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+Restart=on-failure
+RestartSec=30s
+TimeoutStartSec=60s
+
+[Install]
+WantedBy=multi-user.target
