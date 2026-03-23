@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/bytesbytes/bytes-dns/internal/config"
+	"github.com/bytes-commerce/bytes-dns/internal/config"
 )
 
 func writeConfig(t *testing.T, cfg map[string]any, perm os.FileMode) string {

@@ -21,6 +21,7 @@ const (
 type Config struct {
 	APIToken        string `json:"api_token"`
 	Zone            string `json:"zone"`
+	ZoneID          string `json:"zone_id,omitempty"`
 	Record          string `json:"record"`
 	RecordType      string `json:"record_type"`
 	TTL             int    `json:"ttl"`
@@ -29,6 +30,32 @@ type Config struct {
 	LogLevel        string `json:"log_level"`
 	AllowPrivateIP  bool   `json:"allow_private_ip"`
 	DryRun          bool   `json:"dry_run"`
+}
+
+func (c *Config) Save(path string) error {
+	if path == "" {
+		var err error
+		path, err = DefaultConfigPath()
+		if err != nil {
+			return err
+		}
+	}
+
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshalling config: %w", err)
+	}
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("creating config directory: %w", err)
+	}
+
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("writing config file: %w", err)
+	}
+
+	return nil
 }
 
 func ConfigDir() (string, error) {

@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	productionAPIBase = "https://dns.hetzner.com/api/v1"
+	productionAPIBase = "https://api.hetzner.cloud/v1"
 	requestTimeout    = 15 * time.Second
 )
 
@@ -38,7 +38,11 @@ func NewWithBaseURL(token, baseURL string) *Client {
 }
 
 func (c *Client) FindZone(ctx context.Context, zoneName string) (*Zone, error) {
-	params := url.Values{"name": {zoneName}}
+	params := url.Values{
+		"name":     {zoneName},
+		"mode":     {"primary"},
+		"per_page": {"999"},
+	}
 	endpoint := fmt.Sprintf("%s/zones?%s", c.apiBase, params.Encode())
 
 	var result zonesResponse
@@ -55,25 +59,35 @@ func (c *Client) FindZone(ctx context.Context, zoneName string) (*Zone, error) {
 	return nil, fmt.Errorf("zone %q not found — verify the zone exists in your Hetzner account and the API token has access", zoneName)
 }
 
-func (c *Client) ListRecords(ctx context.Context, zoneID string) ([]Record, error) {
-	endpoint := fmt.Sprintf("%s/records?zone_id=%s", c.apiBase, url.QueryEscape(zoneID))
-
-	var result recordsResponse
-	if err := c.get(ctx, endpoint, &result); err != nil {
-		return nil, fmt.Errorf("listing records for zone %s: %w", zoneID, err)
+func (c *Client) ListRRSets(ctx context.Context, zoneID string, name string, recordType string) ([]RRSet, error) {
+	params := url.Values{
+		"per_page": {"100"},
+	}
+	if name != "" {
+		params.Set("name", name)
+	}
+	if recordType != "" {
+		params.Set("type", recordType)
 	}
 
-	return result.Records, nil
+	endpoint := fmt.Sprintf("%s/zones/%s/rrsets?%s", c.apiBase, url.PathEscape(zoneID), params.Encode())
+
+	var result rrsetsResponse
+	if err := c.get(ctx, endpoint, &result); err != nil {
+		return nil, fmt.Errorf("listing rrsets for zone %s: %w", zoneID, err)
+	}
+
+	return result.RRSets, nil
 }
 
-func (c *Client) FindRecord(ctx context.Context, zoneID, name, recordType string) (*Record, error) {
-	records, err := c.ListRecords(ctx, zoneID)
+func (c *Client) FindRRSet(ctx context.Context, zoneID, name, recordType string) (*RRSet, error) {
+	rrsets, err := c.ListRRSets(ctx, zoneID, name, recordType)
 	if err != nil {
 		return nil, err
 	}
 
-	for i := range records {
-		r := &records[i]
+	for i := range rrsets {
+		r := &rrsets[i]
 		if strings.EqualFold(r.Type, recordType) && strings.EqualFold(r.Name, name) {
 			return r, nil
 		}
@@ -82,42 +96,50 @@ func (c *Client) FindRecord(ctx context.Context, zoneID, name, recordType string
 	return nil, nil
 }
 
-func (c *Client) UpdateRecord(ctx context.Context, record *Record, newValue string, ttl int) (*Record, error) {
-	body := updateRecordRequest{
-		ZoneID: record.ZoneID,
-		Type:   record.Type,
-		Name:   record.Name,
-		Value:  newValue,
-		TTL:    ttl,
+func (c *Client) UpdateRRSet(ctx context.Context, zoneID string, rrset *RRSet, newValue string) (*RRSet, error) {
+	body := updateRRSetRequest{
+		Records: []RecordValue{
+			{
+				Value:   newValue,
+				Comment: "Auto-provisionized by Bytes-DNS.",
+			},
+		},
 	}
 
-	endpoint := fmt.Sprintf("%s/records/%s", c.apiBase, url.PathEscape(record.ID))
+	endpoint := fmt.Sprintf("%s/zones/%s/rrsets/%s/%s", c.apiBase, url.PathEscape(zoneID), url.PathEscape(rrset.Name), url.PathEscape(rrset.Type))
 
-	var result recordResponse
-	if err := c.put(ctx, endpoint, body, &result); err != nil {
-		return nil, fmt.Errorf("updating record %s (%s %s): %w", record.ID, record.Type, record.Name, err)
+	if err := c.put(ctx, endpoint, body, nil); err != nil {
+		return nil, fmt.Errorf("updating rrset %s (%s) in zone %s: %w", rrset.Name, rrset.Type, zoneID, err)
 	}
 
-	return &result.Record, nil
+	rrset.Records = body.Records
+	return rrset, nil
 }
 
-func (c *Client) CreateRecord(ctx context.Context, zoneID, name, recordType, value string, ttl int) (*Record, error) {
-	body := createRecordRequest{
-		ZoneID: zoneID,
-		Type:   recordType,
-		Name:   name,
-		Value:  value,
-		TTL:    ttl,
+func (c *Client) CreateRRSet(ctx context.Context, zoneID, name, recordType, value string, ttl int) (*RRSet, error) {
+	body := createRRSetRequest{
+		Name: name,
+		Type: recordType,
+		TTL:  ttl,
+		Records: []RecordValue{
+			{
+				Value:   value,
+				Comment: "Auto-provisionized by Bytes-DNS.",
+			},
+		},
+		Labels: map[string]string{
+			"bytes-dns": "success",
+		},
 	}
 
-	endpoint := fmt.Sprintf("%s/records", c.apiBase)
+	endpoint := fmt.Sprintf("%s/zones/%s/rrsets", c.apiBase, url.PathEscape(zoneID))
 
-	var result recordResponse
+	var result rrsetResponse
 	if err := c.post(ctx, endpoint, body, &result); err != nil {
 		return nil, fmt.Errorf("creating %s record %q in zone %s: %w", recordType, name, zoneID, err)
 	}
 
-	return &result.Record, nil
+	return &result.RRSet, nil
 }
 
 func (c *Client) get(ctx context.Context, endpoint string, out any) error {

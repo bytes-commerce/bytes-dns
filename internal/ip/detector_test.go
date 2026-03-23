@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/bytesbytes/bytes-dns/internal/ip"
+	"github.com/bytes-commerce/bytes-dns/internal/ip"
 )
 
 func serve(t *testing.T, body string, status int) *httptest.Server {

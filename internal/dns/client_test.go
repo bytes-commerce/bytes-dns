@@ -8,18 +8,18 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bytesbytes/bytes-dns/internal/dns"
+	"github.com/bytes-commerce/bytes-dns/internal/dns"
 )
 
 type hetznerMock struct {
-	zones   []map[string]any
-	records []map[string]any
+	zones  []map[string]any
+	rrsets []map[string]any
 }
 
 func (m *hetznerMock) handler() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/api/v1/zones", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/zones", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" {
 			http.Error(w, `{"message":"unauthorized"}`, http.StatusUnauthorized)
 			return
@@ -41,63 +41,46 @@ func (m *hetznerMock) handler() http.Handler {
 		_ = json.NewEncoder(w).Encode(resp)
 	})
 
-	mux.HandleFunc("/api/v1/records", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/zones/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" {
 			http.Error(w, `{"message":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
 
-		switch r.Method {
-		case http.MethodGet:
-			zoneID := r.URL.Query().Get("zone_id")
-			var matched []map[string]any
-			for _, rec := range m.records {
-				if zoneID == "" || rec["zone_id"] == zoneID {
-					matched = append(matched, rec)
+		path := r.URL.Path
+		if strings.HasSuffix(path, "/rrsets") {
+			// POST /v1/zones/{id}/rrsets
+			if r.Method == http.MethodPost {
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "bad request", http.StatusBadRequest)
+					return
 				}
-			}
-			resp := map[string]any{"records": matched}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(resp)
-
-		case http.MethodPost:
-			var body map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				http.Error(w, "bad request", http.StatusBadRequest)
+				body["id"] = body["name"].(string) + "/" + body["type"].(string)
+				resp := map[string]any{"rrset": body}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(resp)
 				return
 			}
-			body["id"] = "new-record-id-001"
-			resp := map[string]any{"record": body}
+			// GET /v1/zones/{id}/rrsets
+			var matched []map[string]any
+			for _, rr := range m.rrsets {
+				matched = append(matched, rr)
+			}
+			resp := map[string]any{"rrsets": matched, "meta": map[string]any{"pagination": map[string]any{}}}
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(resp)
-
-		default:
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		}
-	})
-
-	mux.HandleFunc("/api/v1/records/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") == "" {
-			http.Error(w, `{"message":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
 
-		if r.Method != http.MethodPut {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		// PUT /v1/zones/{id}/rrsets/{name}/{type}
+		if r.Method == http.MethodPut && strings.Contains(path, "/rrsets/") {
+			w.WriteHeader(http.StatusOK)
 			return
 		}
 
-		recID := strings.TrimPrefix(r.URL.Path, "/api/v1/records/")
-		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		body["id"] = recID
-		resp := map[string]any{"record": body}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
+		http.Error(w, "not found", http.StatusNotFound)
 	})
 
 	return mux
@@ -107,15 +90,15 @@ func newTestClient(t *testing.T, mock *hetznerMock) (*dns.Client, *httptest.Serv
 	t.Helper()
 	srv := httptest.NewServer(mock.handler())
 	t.Cleanup(srv.Close)
-	client := dns.NewWithBaseURL("test-token", srv.URL+"/api/v1")
+	client := dns.NewWithBaseURL("test-token", srv.URL+"/v1")
 	return client, srv
 }
 
 func TestFindZone_Found(t *testing.T) {
 	mock := &hetznerMock{
 		zones: []map[string]any{
-			{"id": "zone-001", "name": "example.com"},
-			{"id": "zone-002", "name": "other.org"},
+			{"id": 42, "name": "example.com"},
+			{"id": 43, "name": "other.org"},
 		},
 	}
 	client, _ := newTestClient(t, mock)
@@ -124,8 +107,8 @@ func TestFindZone_Found(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if zone.ID != "zone-001" {
-		t.Errorf("zone ID = %q, want %q", zone.ID, "zone-001")
+	if zone.ID != 42 {
+		t.Errorf("zone ID = %d, want %d", zone.ID, 42)
 	}
 	if zone.Name != "example.com" {
 		t.Errorf("zone Name = %q, want %q", zone.Name, "example.com")
@@ -142,115 +125,82 @@ func TestFindZone_NotFound(t *testing.T) {
 	}
 }
 
-func TestListRecords(t *testing.T) {
+func TestListRRSets(t *testing.T) {
 	mock := &hetznerMock{
-		zones: []map[string]any{{"id": "zone-001", "name": "example.com"}},
-		records: []map[string]any{
-			{"id": "rec-001", "zone_id": "zone-001", "type": "A", "name": "home", "value": "1.2.3.4", "ttl": 60},
-			{"id": "rec-002", "zone_id": "zone-001", "type": "A", "name": "mail", "value": "5.6.7.8", "ttl": 300},
+		rrsets: []map[string]any{
+			{"id": "home/A", "name": "home", "type": "A", "ttl": 60, "records": []map[string]any{{"value": "1.2.3.4"}}},
+			{"id": "mail/A", "name": "mail", "type": "A", "ttl": 300, "records": []map[string]any{{"value": "5.6.7.8"}}},
 		},
 	}
 	client, _ := newTestClient(t, mock)
 
-	records, err := client.ListRecords(context.Background(), "zone-001")
+	rrsets, err := client.ListRRSets(context.Background(), "42", "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(records) != 2 {
-		t.Errorf("got %d records, want 2", len(records))
+	if len(rrsets) != 2 {
+		t.Errorf("got %d rrsets, want 2", len(rrsets))
 	}
 }
 
-func TestFindRecord_Found(t *testing.T) {
+func TestFindRRSet_Found(t *testing.T) {
 	mock := &hetznerMock{
-		records: []map[string]any{
-			{"id": "rec-001", "zone_id": "zone-001", "type": "A", "name": "home", "value": "1.2.3.4", "ttl": 60},
+		rrsets: []map[string]any{
+			{"id": "home/A", "name": "home", "type": "A", "ttl": 60, "records": []map[string]any{{"value": "1.2.3.4"}}},
 		},
 	}
 	client, _ := newTestClient(t, mock)
 
-	rec, err := client.FindRecord(context.Background(), "zone-001", "home", "A")
+	rr, err := client.FindRRSet(context.Background(), "42", "home", "A")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if rec == nil {
-		t.Fatal("expected record, got nil")
+	if rr == nil {
+		t.Fatal("expected RRSet, got nil")
 	}
-	if rec.ID != "rec-001" {
-		t.Errorf("record ID = %q, want %q", rec.ID, "rec-001")
+	if rr.Name != "home" {
+		t.Errorf("RRSet Name = %q, want %q", rr.Name, "home")
 	}
-	if rec.Value != "1.2.3.4" {
-		t.Errorf("record Value = %q, want %q", rec.Value, "1.2.3.4")
-	}
-}
-
-func TestFindRecord_NotFound(t *testing.T) {
-	mock := &hetznerMock{records: []map[string]any{}}
-	client, _ := newTestClient(t, mock)
-
-	rec, err := client.FindRecord(context.Background(), "zone-001", "missing", "A")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if rec != nil {
-		t.Errorf("expected nil record for missing name, got %+v", rec)
+	if rr.Records[0].Value != "1.2.3.4" {
+		t.Errorf("RRSet Value = %q, want %q", rr.Records[0].Value, "1.2.3.4")
 	}
 }
 
-func TestFindRecord_CaseInsensitive(t *testing.T) {
-	mock := &hetznerMock{
-		records: []map[string]any{
-			{"id": "rec-001", "zone_id": "zone-001", "type": "A", "name": "Home", "value": "1.2.3.4", "ttl": 60},
-		},
-	}
-	client, _ := newTestClient(t, mock)
-
-	rec, err := client.FindRecord(context.Background(), "zone-001", "home", "A")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if rec == nil {
-		t.Fatal("expected record (case-insensitive match), got nil")
-	}
-}
-
-func TestUpdateRecord(t *testing.T) {
+func TestUpdateRRSet(t *testing.T) {
 	mock := &hetznerMock{}
 	client, _ := newTestClient(t, mock)
 
-	existing := &dns.Record{
-		ID:     "rec-001",
-		ZoneID: "zone-001",
-		Type:   "A",
-		Name:   "home",
-		Value:  "1.2.3.4",
-		TTL:    60,
+	existing := &dns.RRSet{
+		ID:   "home/A",
+		Name: "home",
+		Type: "A",
+		TTL:  60,
+		Records: []dns.RecordValue{
+			{Value: "1.2.3.4"},
+		},
 	}
 
-	updated, err := client.UpdateRecord(context.Background(), existing, "9.9.9.9", 120)
+	updated, err := client.UpdateRRSet(context.Background(), "42", existing, "9.9.9.9")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if updated.Value != "9.9.9.9" {
-		t.Errorf("updated value = %q, want %q", updated.Value, "9.9.9.9")
-	}
-	if updated.ID != "rec-001" {
-		t.Errorf("record ID should be preserved, got %q", updated.ID)
+	if updated.Records[0].Value != "9.9.9.9" {
+		t.Errorf("updated value = %q, want %q", updated.Records[0].Value, "9.9.9.9")
 	}
 }
 
-func TestCreateRecord(t *testing.T) {
+func TestCreateRRSet(t *testing.T) {
 	mock := &hetznerMock{}
 	client, _ := newTestClient(t, mock)
 
-	created, err := client.CreateRecord(context.Background(), "zone-001", "newhost", "A", "10.0.0.1", 60)
+	created, err := client.CreateRRSet(context.Background(), "42", "newhost", "A", "10.0.0.1", 60)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if created.ID != "new-record-id-001" {
-		t.Errorf("created record ID = %q, want %q", created.ID, "new-record-id-001")
+	if created.ID != "newhost/A" {
+		t.Errorf("created RRSet ID = %q, want %q", created.ID, "newhost/A")
 	}
-	if created.Value != "10.0.0.1" {
-		t.Errorf("created record value = %q, want %q", created.Value, "10.0.0.1")
+	if created.Records[0].Value != "10.0.0.1" {
+		t.Errorf("created record value = %q, want %q", created.Records[0].Value, "10.0.0.1")
 	}
 }

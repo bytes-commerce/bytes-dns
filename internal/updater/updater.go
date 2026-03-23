@@ -5,26 +5,26 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/bytesbytes/bytes-dns/internal/config"
-	"github.com/bytesbytes/bytes-dns/internal/dns"
-	"github.com/bytesbytes/bytes-dns/internal/ip"
-	"github.com/bytesbytes/bytes-dns/internal/logger"
-	"github.com/bytesbytes/bytes-dns/internal/state"
+	"github.com/bytes-commerce/bytes-dns/internal/config"
+	"github.com/bytes-commerce/bytes-dns/internal/dns"
+	"github.com/bytes-commerce/bytes-dns/internal/ip"
+	"github.com/bytes-commerce/bytes-dns/internal/logger"
+	"github.com/bytes-commerce/bytes-dns/internal/state"
 )
 
 type dnsClient interface {
 	FindZone(ctx context.Context, zoneName string) (*dns.Zone, error)
-	FindRecord(ctx context.Context, zoneID, name, recordType string) (*dns.Record, error)
-	UpdateRecord(ctx context.Context, record *dns.Record, newValue string, ttl int) (*dns.Record, error)
-	CreateRecord(ctx context.Context, zoneID, name, recordType, value string, ttl int) (*dns.Record, error)
+	FindRRSet(ctx context.Context, zoneID, name, recordType string) (*dns.RRSet, error)
+	UpdateRRSet(ctx context.Context, zoneID string, rrset *dns.RRSet, newValue string) (*dns.RRSet, error)
+	CreateRRSet(ctx context.Context, zoneID, name, recordType, value string, ttl int) (*dns.RRSet, error)
 }
 
 type Result struct {
-	PublicIP   string
-	RecordID   string
-	ZoneID     string
-	Action     Action
-	DryRun     bool
+	PublicIP string
+	RecordID string
+	ZoneID   string
+	Action   Action
+	DryRun   bool
 }
 
 type Action string
@@ -76,58 +76,69 @@ func (u *Updater) Run(ctx context.Context, force bool) (*Result, error) {
 		return &Result{PublicIP: ipStr, Action: ActionNoChange}, nil
 	}
 
-	zone, err := u.dnsClient.FindZone(ctx, u.cfg.Zone)
-	if err != nil {
-		return nil, err
+	zoneID := u.cfg.ZoneID
+	if zoneID == "" {
+		zone, err := u.dnsClient.FindZone(ctx, u.cfg.Zone)
+		if err != nil {
+			return nil, err
+		}
+		zoneID = fmt.Sprintf("%d", zone.ID)
+		u.cfg.ZoneID = zoneID
+		_ = u.cfg.Save("")
+		logger.Debug("resolved zone %q => id=%s", u.cfg.Zone, zoneID)
 	}
-	logger.Debug("resolved zone %q => id=%s", u.cfg.Zone, zone.ID)
 
 	label := u.cfg.RecordLabel()
 	logger.Debug("record label: %q (record=%s, zone=%s)", label, u.cfg.Record, u.cfg.Zone)
 
-	record, err := u.dnsClient.FindRecord(ctx, zone.ID, label, u.cfg.RecordType)
+	rrset, err := u.dnsClient.FindRRSet(ctx, zoneID, label, u.cfg.RecordType)
 	if err != nil {
 		return nil, err
 	}
 
-	if u.cfg.DryRun {
-		if record != nil {
-			if record.Value == ipStr {
-				logger.Info("[dry-run] record %s %s = %s — no change needed", u.cfg.RecordType, u.cfg.Record, ipStr)
-				return &Result{PublicIP: ipStr, RecordID: record.ID, ZoneID: zone.ID, Action: ActionNoChange, DryRun: true}, nil
-			}
-			logger.Info("[dry-run] would update record %s %s: %s => %s", u.cfg.RecordType, u.cfg.Record, record.Value, ipStr)
-			return &Result{PublicIP: ipStr, RecordID: record.ID, ZoneID: zone.ID, Action: ActionUpdated, DryRun: true}, nil
-		}
-		logger.Info("[dry-run] would create record %s %s = %s", u.cfg.RecordType, u.cfg.Record, ipStr)
-		return &Result{PublicIP: ipStr, ZoneID: zone.ID, Action: ActionCreated, DryRun: true}, nil
+	var currentRecordValue string
+	if rrset != nil && len(rrset.Records) > 0 {
+		currentRecordValue = rrset.Records[0].Value
 	}
 
-	if record != nil {
-		if record.Value == ipStr {
+	if u.cfg.DryRun {
+		if rrset != nil {
+			if currentRecordValue == ipStr {
+				logger.Info("[dry-run] record %s %s = %s — no change needed", u.cfg.RecordType, u.cfg.Record, ipStr)
+				return &Result{PublicIP: ipStr, RecordID: rrset.ID, ZoneID: zoneID, Action: ActionNoChange, DryRun: true}, nil
+			}
+			logger.Info("[dry-run] would update record %s %s: %s => %s", u.cfg.RecordType, u.cfg.Record, currentRecordValue, ipStr)
+			return &Result{PublicIP: ipStr, RecordID: rrset.ID, ZoneID: zoneID, Action: ActionUpdated, DryRun: true}, nil
+		}
+		logger.Info("[dry-run] would create record %s %s = %s", u.cfg.RecordType, u.cfg.Record, ipStr)
+		return &Result{PublicIP: ipStr, ZoneID: zoneID, Action: ActionCreated, DryRun: true}, nil
+	}
+
+	if rrset != nil {
+		if currentRecordValue == ipStr {
 			logger.Info("DNS record already correct (%s %s = %s) — no API write needed", u.cfg.RecordType, u.cfg.Record, ipStr)
-			_ = u.stateManager.MarkUpdated(st, ipStr, record.ID)
-			return &Result{PublicIP: ipStr, RecordID: record.ID, ZoneID: zone.ID, Action: ActionNoChange}, nil
+			_ = u.stateManager.MarkUpdated(st, ipStr, rrset.ID)
+			return &Result{PublicIP: ipStr, RecordID: rrset.ID, ZoneID: zoneID, Action: ActionNoChange}, nil
 		}
 
-		logger.Info("updating %s record %s: %s => %s", u.cfg.RecordType, u.cfg.Record, record.Value, ipStr)
-		updated, err := u.dnsClient.UpdateRecord(ctx, record, ipStr, u.cfg.TTL)
+		logger.Info("updating %s record %s: %s => %s", u.cfg.RecordType, u.cfg.Record, currentRecordValue, ipStr)
+		updated, err := u.dnsClient.UpdateRRSet(ctx, zoneID, rrset, ipStr)
 		if err != nil {
 			return nil, fmt.Errorf("DNS update failed: %w", err)
 		}
 		_ = u.stateManager.MarkUpdated(st, ipStr, updated.ID)
 		logger.Info("record updated successfully (id=%s)", updated.ID)
-		return &Result{PublicIP: ipStr, RecordID: updated.ID, ZoneID: zone.ID, Action: ActionUpdated}, nil
+		return &Result{PublicIP: ipStr, RecordID: updated.ID, ZoneID: zoneID, Action: ActionUpdated}, nil
 	}
 
 	logger.Info("creating %s record %s = %s (ttl=%d)", u.cfg.RecordType, u.cfg.Record, ipStr, u.cfg.TTL)
-	created, err := u.dnsClient.CreateRecord(ctx, zone.ID, label, u.cfg.RecordType, ipStr, u.cfg.TTL)
+	created, err := u.dnsClient.CreateRRSet(ctx, zoneID, label, u.cfg.RecordType, ipStr, u.cfg.TTL)
 	if err != nil {
 		return nil, fmt.Errorf("DNS create failed: %w", err)
 	}
 	_ = u.stateManager.MarkUpdated(st, ipStr, created.ID)
 	logger.Info("record created successfully (id=%s)", created.ID)
-	return &Result{PublicIP: ipStr, RecordID: created.ID, ZoneID: zone.ID, Action: ActionCreated}, nil
+	return &Result{PublicIP: ipStr, RecordID: created.ID, ZoneID: zoneID, Action: ActionCreated}, nil
 }
 
 func (u *Updater) Test(ctx context.Context) error {
@@ -139,26 +150,39 @@ func (u *Updater) Test(ctx context.Context) error {
 	}
 	fmt.Printf("  public IP  : %s\n", currentIP)
 
-	zone, err := u.dnsClient.FindZone(ctx, u.cfg.Zone)
-	if err != nil {
-		return fmt.Errorf("zone lookup failed: %w", err)
+	zoneID := u.cfg.ZoneID
+	var zoneName = u.cfg.Zone
+	if zoneID == "" {
+		zone, err := u.dnsClient.FindZone(ctx, u.cfg.Zone)
+		if err != nil {
+			return fmt.Errorf("zone lookup failed: %w", err)
+		}
+		zoneID = fmt.Sprintf("%d", zone.ID)
+		zoneName = zone.Name
+		u.cfg.ZoneID = zoneID
+		_ = u.cfg.Save("")
 	}
-	fmt.Printf("  zone       : %s (id=%s)\n", zone.Name, zone.ID)
+	fmt.Printf("  zone       : %s (id=%s)\n", zoneName, zoneID)
 
 	label := u.cfg.RecordLabel()
 	fmt.Printf("  record     : %s %s (label=%q)\n", u.cfg.RecordType, u.cfg.Record, label)
 
-	record, err := u.dnsClient.FindRecord(ctx, zone.ID, label, u.cfg.RecordType)
+	rrset, err := u.dnsClient.FindRRSet(ctx, zoneID, label, u.cfg.RecordType)
 	if err != nil {
 		return fmt.Errorf("record lookup failed: %w", err)
 	}
 
-	if record == nil {
+	var currentRecordValue string
+	if rrset != nil && len(rrset.Records) > 0 {
+		currentRecordValue = rrset.Records[0].Value
+	}
+
+	if rrset == nil {
 		fmt.Printf("  status     : record does not exist — would CREATE with value=%s\n", currentIP)
-	} else if record.Value == currentIP.String() {
-		fmt.Printf("  status     : record exists with correct value=%s — no change needed\n", record.Value)
+	} else if currentRecordValue == currentIP.String() {
+		fmt.Printf("  status     : record exists with correct value=%s — no change needed\n", currentRecordValue)
 	} else {
-		fmt.Printf("  status     : record exists with value=%s — would UPDATE to %s\n", record.Value, currentIP)
+		fmt.Printf("  status     : record exists with value=%s — would UPDATE to %s\n", currentRecordValue, currentIP)
 	}
 
 	fmt.Println("=== test passed ===")

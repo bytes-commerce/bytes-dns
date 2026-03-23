@@ -1,19 +1,7 @@
 #!/usr/bin/env bash
-# install.sh — install bytes-dns as a systemd service for the current user.
-# Requires: Go >= 1.22, systemd, bash, jq (for config parsing).
-#
-# Usage:
-#   bash install.sh            # build from source and install
-#   BINARY=/path/to/binary bash install.sh   # install pre-built binary
-#
-# Environment:
-#   BYTES_DNS_USER   — user to install the service for (default: current user)
-#   BINARY           — path to pre-built binary (skips go build)
-#   PREFIX           — binary install prefix (default: /usr/local/bin)
-#   SYSTEMD_DIR      — systemd unit directory (default: /etc/systemd/system)
 set -euo pipefail
 
-# ── Colours ──────────────────────────────────────────────────────────────────
+# ── Colors ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
@@ -45,7 +33,7 @@ if [[ -n "$BINARY" ]]; then
 else
     command -v go &>/dev/null || error "Go not found — install go >= 1.22 or set BINARY=/path/to/bytes-dns."
 
-    go_version=$(go version | awk '{print $3}' | sed 's/go
+    go_version=$(go version | awk '{print $3}' | sed 's/go//')
     required_major=1; required_minor=22
     IFS='.' read -r got_major got_minor _ <<< "$go_version"
     if [[ "$got_major" -lt "$required_major" ]] || { [[ "$got_major" -eq "$required_major" ]] && [[ "${got_minor%%[^0-9]*}" -lt "$required_minor" ]]; }; then
@@ -74,9 +62,22 @@ else
     info "Build complete."
 fi
 
+# ── Create config directory ───────────────────────────────────────────────────
+if [[ ! -d "$config_dir" ]]; then
+    info "Creating config directory ${config_dir} ..."
+    install -d -m 700 -o "$BYTES_DNS_USER" -g "$BYTES_DNS_USER" "$config_dir"
+fi
+
 # ── Install binary ───────────────────────────────────────────────────────────
 info "Installing binary to ${PREFIX}/bytes-dns ..."
 install -m 755 "$BINARY" "${PREFIX}/bytes-dns"
+
+# ── Configure bytes-dns ───────────────────────────────────────────────────────
+if [[ ! -f "$config_file" ]] || grep -q 'YOUR_HETZNER_API_TOKEN' "$config_file" 2>/dev/null; then
+    info "Launching interactive setup..."
+    # Run setup as the target user to ensure correct file ownership.
+    sudo -u "$BYTES_DNS_USER" "${PREFIX}/bytes-dns" setup --config="$config_file"
+fi
 
 # ── Read interval from config (if it exists already) ─────────────────────────
 interval_minutes=5
@@ -107,22 +108,8 @@ sed "s/INTERVAL_PLACEHOLDER/${interval_minutes}min/" \
     > "${SYSTEMD_DIR}/bytes-dns@.timer"
 chmod 644 "${SYSTEMD_DIR}/bytes-dns@.timer"
 
-# ── Create config directory ───────────────────────────────────────────────────
-if [[ ! -d "$config_dir" ]]; then
-    info "Creating config directory ${config_dir} ..."
-    install -d -m 700 -o "$BYTES_DNS_USER" -g "$BYTES_DNS_USER" "$config_dir"
-fi
-
-# Install example config only if no existing config is present.
-if [[ ! -f "$config_file" ]]; then
-    if [[ -f "${SCRIPT_DIR}/examples/config.json" ]]; then
-        install -m 600 -o "$BYTES_DNS_USER" -g "$BYTES_DNS_USER" \
-            "${SCRIPT_DIR}/examples/config.json" "$config_file"
-        warn "Example config installed at ${config_file}"
-        warn "Edit it and set your api_token, zone, and record before the timer fires."
-    fi
-else
-    # Enforce restrictive permissions on existing config.
+# Enforce restrictive permissions on config.
+if [[ -f "$config_file" ]]; then
     chmod 600 "$config_file"
 fi
 

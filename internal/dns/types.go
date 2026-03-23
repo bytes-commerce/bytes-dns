@@ -3,53 +3,62 @@ package dns
 import "time"
 
 type Zone struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID        int       `json:"id"`
+	Name      string    `json:"name"`
+	Created   time.Time `json:"created"`
+	TTL       int       `json:"ttl"`
+	Status    string    `json:"status"`
+	Registrar string    `json:"registrar"`
+	Mode      string    `json:"mode"`
 }
 
-type Record struct {
-	ID       string `json:"id"`
-	ZoneID   string `json:"zone_id"`
-	Type     string `json:"type"`
-	Name     string `json:"name"`
-	Value    string `json:"value"`
-	TTL      int    `json:"ttl"`
-	Created  time.Time `json:"created"`
-	Modified time.Time `json:"modified"`
+type RRSet struct {
+	ID      string        `json:"id"`
+	Name    string        `json:"name"`
+	Type    string        `json:"type"`
+	TTL     int           `json:"ttl"`
+	Records []RecordValue `json:"records"`
+	Zone    int           `json:"zone"`
+}
+
+type RecordValue struct {
+	Value   string `json:"value"`
+	Comment string `json:"comment"`
+}
+
+type Meta struct {
+	Pagination struct {
+		Page         int `json:"page"`
+		PerPage      int `json:"per_page"`
+		PreviousPage int `json:"previous_page"`
+		NextPage     int `json:"next_page"`
+		LastPage     int `json:"last_page"`
+		TotalEntries int `json:"total_entries"`
+	} `json:"pagination"`
 }
 
 type zonesResponse struct {
 	Zones []Zone `json:"zones"`
-	Meta  struct {
-		Pagination struct {
-			Page         int `json:"page"`
-			PerPage      int `json:"per_page"`
-			LastPage     int `json:"last_page"`
-			TotalEntries int `json:"total_entries"`
-		} `json:"pagination"`
-	} `json:"meta"`
+	Meta  Meta   `json:"meta"`
 }
 
-type recordsResponse struct {
-	Records []Record `json:"records"`
+type rrsetsResponse struct {
+	RRSets []RRSet `json:"rrsets"`
+	Meta   Meta    `json:"meta"`
 }
 
-type recordResponse struct {
-	Record Record `json:"record"`
+type rrsetResponse struct {
+	RRSet RRSet `json:"rrset"`
 }
 
-type createRecordRequest struct {
-	ZoneID string `json:"zone_id"`
-	Type   string `json:"type"`
-	Name   string `json:"name"`
-	Value  string `json:"value"`
-	TTL    int    `json:"ttl"`
+type createRRSetRequest struct {
+	Name    string            `json:"name"`
+	Type    string            `json:"type"`
+	TTL     int               `json:"ttl"`
+	Records []RecordValue     `json:"records"`
+	Labels  map[string]string `json:"labels,omitempty"`
 }
 
-type updateRecordRequest struct {
-	ZoneID string `json:"zone_id"`
-	Type   string `json:"type"`
-	Name   string `json:"name"`
-	Value  string `json:"value"`
-	TTL    int    `json:"ttl"`
+type updateRRSetRequest struct {
+	Records []RecordValue `json:"records"`
 }

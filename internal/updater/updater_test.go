@@ -9,50 +9,46 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bytesbytes/bytes-dns/internal/config"
-	"github.com/bytesbytes/bytes-dns/internal/dns"
-	"github.com/bytesbytes/bytes-dns/internal/state"
-	"github.com/bytesbytes/bytes-dns/internal/updater"
+	"github.com/bytes-commerce/bytes-dns/internal/config"
+	"github.com/bytes-commerce/bytes-dns/internal/dns"
+	"github.com/bytes-commerce/bytes-dns/internal/state"
+	"github.com/bytes-commerce/bytes-dns/internal/updater"
 )
 
-func hetznerAPIHandler(existingRecord *dns.Record) http.Handler {
+func hetznerAPIHandler(existingRRSet *dns.RRSet) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
 		switch {
-		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/zones"):
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/zones") && !strings.Contains(r.URL.Path, "/rrsets"):
 			json.NewEncoder(w).Encode(map[string]any{
-				"zones": []map[string]any{{"id": "zone-001", "name": "example.com"}},
+				"zones": []map[string]any{{"id": 42, "name": "example.com"}},
 				"meta":  map[string]any{"pagination": map[string]any{}},
 			})
 
-		case r.Method == http.MethodGet && r.URL.Path == "/records":
-			records := []map[string]any{}
-			if existingRecord != nil {
-				records = append(records, map[string]any{
-					"id":      existingRecord.ID,
-					"zone_id": existingRecord.ZoneID,
-					"type":    existingRecord.Type,
-					"name":    existingRecord.Name,
-					"value":   existingRecord.Value,
-					"ttl":     existingRecord.TTL,
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/rrsets"):
+			rrsets := []map[string]any{}
+			if existingRRSet != nil {
+				rrsets = append(rrsets, map[string]any{
+					"id":      existingRRSet.ID,
+					"name":    existingRRSet.Name,
+					"type":    existingRRSet.Type,
+					"ttl":     existingRRSet.TTL,
+					"records": existingRRSet.Records,
+					"zone":    existingRRSet.Zone,
 				})
 			}
-			json.NewEncoder(w).Encode(map[string]any{"records": records})
+			json.NewEncoder(w).Encode(map[string]any{"rrsets": rrsets, "meta": map[string]any{"pagination": map[string]any{}}})
 
-		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/records/"):
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/rrsets/"):
+			w.WriteHeader(http.StatusOK)
+
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/rrsets"):
 			var body map[string]any
 			json.NewDecoder(r.Body).Decode(&body)
-			recID := strings.TrimPrefix(r.URL.Path, "/records/")
-			body["id"] = recID
-			json.NewEncoder(w).Encode(map[string]any{"record": body})
-
-		case r.Method == http.MethodPost && r.URL.Path == "/records":
-			var body map[string]any
-			json.NewDecoder(r.Body).Decode(&body)
-			body["id"] = "created-record-001"
+			body["id"] = "created-rrset-001"
 			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(map[string]any{"record": body})
+			json.NewEncoder(w).Encode(map[string]any{"rrset": body})
 
 		default:
 			http.Error(w, "not found", http.StatusNotFound)
@@ -60,7 +56,7 @@ func hetznerAPIHandler(existingRecord *dns.Record) http.Handler {
 	})
 }
 
-func setupServers(t *testing.T, publicIP string, existingRecord *dns.Record) (*updater.Updater, *state.Manager) {
+func setupServers(t *testing.T, publicIP string, existingRRSet *dns.RRSet) (*updater.Updater, *state.Manager) {
 	t.Helper()
 
 	ipSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -68,7 +64,7 @@ func setupServers(t *testing.T, publicIP string, existingRecord *dns.Record) (*u
 	}))
 	t.Cleanup(ipSrv.Close)
 
-	apiSrv := httptest.NewServer(hetznerAPIHandler(existingRecord))
+	apiSrv := httptest.NewServer(hetznerAPIHandler(existingRRSet))
 	t.Cleanup(apiSrv.Close)
 
 	cfg := &config.Config{
@@ -107,8 +103,9 @@ func TestRun_CreateNewRecord(t *testing.T) {
 }
 
 func TestRun_UpdateExistingRecord(t *testing.T) {
-	existing := &dns.Record{
-		ID: "rec-001", ZoneID: "zone-001", Type: "A", Name: "home", Value: "1.2.3.4", TTL: 60,
+	existing := &dns.RRSet{
+		ID: "home/A", Name: "home", Type: "A", TTL: 60, Zone: 42,
+		Records: []dns.RecordValue{{Value: "1.2.3.4"}},
 	}
 	u, _ := setupServers(t, "9.9.9.9", existing)
 
@@ -126,8 +123,9 @@ func TestRun_UpdateExistingRecord(t *testing.T) {
 }
 
 func TestRun_NoChangeWhenIPMatches(t *testing.T) {
-	existing := &dns.Record{
-		ID: "rec-001", ZoneID: "zone-001", Type: "A", Name: "home", Value: "1.2.3.4", TTL: 60,
+	existing := &dns.RRSet{
+		ID: "home/A", Name: "home", Type: "A", TTL: 60, Zone: 42,
+		Records: []dns.RecordValue{{Value: "1.2.3.4"}},
 	}
 	u, _ := setupServers(t, "1.2.3.4", existing)
 
@@ -142,13 +140,14 @@ func TestRun_NoChangeWhenIPMatches(t *testing.T) {
 }
 
 func TestRun_SkipsAPIWhenCacheMatches(t *testing.T) {
-	existing := &dns.Record{
-		ID: "rec-001", ZoneID: "zone-001", Type: "A", Name: "home", Value: "1.2.3.4", TTL: 60,
+	existing := &dns.RRSet{
+		ID: "home/A", Name: "home", Type: "A", TTL: 60, Zone: 42,
+		Records: []dns.RecordValue{{Value: "1.2.3.4"}},
 	}
 	u, sm := setupServers(t, "1.2.3.4", existing)
 
 	st, _ := sm.Load()
-	_ = sm.MarkUpdated(st, "1.2.3.4", "rec-001")
+	_ = sm.MarkUpdated(st, "1.2.3.4", "home/A")
 
 	result, err := u.Run(context.Background(), false)
 	if err != nil {
@@ -161,13 +160,14 @@ func TestRun_SkipsAPIWhenCacheMatches(t *testing.T) {
 }
 
 func TestRun_ForceBypassesCache(t *testing.T) {
-	existing := &dns.Record{
-		ID: "rec-001", ZoneID: "zone-001", Type: "A", Name: "home", Value: "1.2.3.4", TTL: 60,
+	existing := &dns.RRSet{
+		ID: "home/A", Name: "home", Type: "A", TTL: 60, Zone: 42,
+		Records: []dns.RecordValue{{Value: "1.2.3.4"}},
 	}
 	u, sm := setupServers(t, "1.2.3.4", existing)
 
 	st, _ := sm.Load()
-	_ = sm.MarkUpdated(st, "1.2.3.4", "rec-001")
+	_ = sm.MarkUpdated(st, "1.2.3.4", "home/A")
 
 	result, err := u.Run(context.Background(), true)
 	if err != nil {

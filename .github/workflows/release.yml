@@ -53,13 +53,15 @@ jobs:
           CGO_ENABLED: "0"
         run: |
           mkdir -p dist
+          ls -lh dist
+          ls -lh 
           go build \
             -ldflags="-s -w \
               -X main.Version=${{ steps.meta.outputs.version }} \
               -X main.Commit=${{ steps.meta.outputs.commit }} \
               -X main.BuildDate=${{ steps.meta.outputs.date }}" \
             -o dist/bytes-dns-${{ matrix.suffix }} \
-            ./cmd/bytes-dns/main.go
+            github.com/bytes-commerce/bytes-dns/cmd/bytes-dns
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

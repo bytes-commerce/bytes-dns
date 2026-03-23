@@ -1,23 +1,13 @@
 {
-  "_comment": "bytes-dns configuration — copy to ~/.bytes-dns/config.json and set permissions: chmod 600 ~/.bytes-dns/config.json",
-
+  "_comment": "copy this file to ~/.bytes-dns/config.json and set permissions: chmod 600 ~/.bytes-dns/config.json",
   "api_token": "YOUR_HETZNER_API_TOKEN",
-
   "zone": "example.com",
-
   "record": "home.example.com",
-
   "record_type": "A",
-
   "ttl": 60,
-
   "interval_minutes": 5,
-
   "ip_source": "https://api4.my-ip.io/ip.txt",
-
   "log_level": "info",
-
   "allow_private_ip": false,
-
   "dry_run": false
 }

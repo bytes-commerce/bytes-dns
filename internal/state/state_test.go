@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bytesbytes/bytes-dns/internal/state"
+	"github.com/bytes-commerce/bytes-dns/internal/state"
 )
 
 func newManager(t *testing.T) *state.Manager {
