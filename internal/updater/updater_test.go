@@ -210,3 +210,40 @@ func TestRun_DryRunCreate(t *testing.T) {
 		t.Errorf("action = %q, want %q", result.Action, updater.ActionCreated)
 	}
 }
+
+func TestNew(t *testing.T) {
+	cfg := &config.Config{APIToken: "test-token"}
+	dir := t.TempDir()
+	sm := state.New(filepath.Join(dir, "state.json"))
+	u := updater.New(cfg, sm)
+	if u == nil {
+		t.Fatal("expected updater to be created")
+	}
+}
+
+func TestTest(t *testing.T) {
+	u, _ := setupServers(t, "5.6.7.8", nil)
+	err := u.Test(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDetectIP_UnsupportedType(t *testing.T) {
+	ipSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("5.6.7.8"))
+	}))
+	t.Cleanup(ipSrv.Close)
+
+	cfg := &config.Config{
+		RecordType: "MX",
+		IPSource:   ipSrv.URL,
+	}
+	dir := t.TempDir()
+	sm := state.New(filepath.Join(dir, "state.json"))
+	u := updater.NewWithDNSClient(cfg, sm, nil)
+	_, err := u.Run(context.Background(), false)
+	if err == nil || !strings.Contains(err.Error(), "unsupported record_type") {
+		t.Errorf("expected unsupported record_type error, got %v", err)
+	}
+}

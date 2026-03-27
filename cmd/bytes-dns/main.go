@@ -126,7 +126,7 @@ func cmdRun(args []string) {
 
 	switch result.Action {
 	case updater.ActionNoChange:
-		logger.Info("done — no change (ip=%s)", result.PublicIP)
+		logger.Info("done - no change (ip=%s)", result.PublicIP)
 	case updater.ActionUpdated:
 		if result.DryRun {
 			logger.Info("done — [dry-run] would update to ip=%s", result.PublicIP)
@@ -304,20 +304,39 @@ func cmdSetup(args []string) {
 		fmt.Scanln(&cfg.Zone)
 	}
 
-	zone, err := dnsClient.FindZone(ctx, cfg.Zone)
+	zone, err := dnsClient.FindZoneByRecord(ctx, cfg.Record)
+	if err != nil {
+		zone, err = dnsClient.FindZone(ctx, cfg.Zone)
+	}
+
 	if err != nil {
 		fmt.Printf("Zone %q not found. Do you want to create it? (y/n): ", cfg.Zone)
 		var confirm string
 		fmt.Scanln(&confirm)
 		if strings.ToLower(confirm) == "y" {
-			fmt.Println("Note: Zone creation via Cloud API requires primary_nameservers and other fields not implemented here.")
-			fmt.Println("Please create the zone in Hetzner Cloud Console first.")
-			os.Exit(1)
+			if !strings.Contains(cfg.Zone, ".") {
+				fmt.Fprintf(os.Stderr, "Error: %q does not look like a valid zone name (must contain at least one dot).\n", cfg.Zone)
+				os.Exit(1)
+			}
+			var err2 error
+			zone, err2 = dnsClient.CreateZone(ctx, cfg.Zone, cfg.TTL)
+			if err2 != nil {
+				fmt.Fprintf(os.Stderr, "Error creating zone: %v\n", err2)
+				os.Exit(1)
+			}
+			fmt.Printf("Zone %q created successfully (ID: %d).\n", zone.Name, zone.ID)
 		} else {
 			fmt.Println("Setup cancelled.")
 			os.Exit(1)
 		}
 	}
+
+	if zone == nil {
+		fmt.Fprintln(os.Stderr, "Error: No zone resolved.")
+		os.Exit(1)
+	}
+
+	cfg.Zone = zone.Name
 	cfg.ZoneID = fmt.Sprintf("%d", zone.ID)
 	fmt.Printf("Using Zone: %s (ID: %s)\n", zone.Name, cfg.ZoneID)
 

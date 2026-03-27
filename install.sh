@@ -1,22 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ── Colors ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
-# ── Defaults ─────────────────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BYTES_DNS_USER="${BYTES_DNS_USER:-$(id -un)}"
 PREFIX="${PREFIX:-/usr/local/bin}"
 SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 BINARY="${BINARY:-}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# ── Sanity checks ────────────────────────────────────────────────────────────
 [[ "$(uname -s)" == "Linux" ]] || error "bytes-dns requires Linux with systemd."
-command -v systemctl &>/dev/null || error "systemctl not found — is systemd running?"
+command -v systemctl &>/dev/null || error "systemctl not found - is systemd running?"
 [[ $EUID -eq 0 ]] || error "This installer must be run as root (sudo bash install.sh)."
 
 target_home="$(getent passwd "$BYTES_DNS_USER" | cut -d: -f6)"
@@ -26,18 +23,25 @@ config_dir="${target_home}/.bytes-dns"
 config_file="${config_dir}/config.json"
 state_file="${config_dir}/state.json"
 
-# ── Build binary ─────────────────────────────────────────────────────────────
 if [[ -n "$BINARY" ]]; then
     info "Using provided binary: $BINARY"
     [[ -f "$BINARY" ]] || error "Provided binary '$BINARY' not found."
 else
-    command -v go &>/dev/null || error "Go not found — install go >= 1.22 or set BINARY=/path/to/bytes-dns."
+    if ! command -v go &>/dev/null; then
+        for p in /usr/local/go/bin /usr/lib/go/bin; do
+            if [[ -x "$p/go" ]]; then
+                export PATH="$PATH:$p"
+                break
+            fi
+        done
+    fi
+    command -v go &>/dev/null || error "Go not found — install go >= 1.20 or set BINARY=/path/to/bytes-dns."
 
     go_version=$(go version | awk '{print $3}' | sed 's/go//')
-    required_major=1; required_minor=22
+    required_major=1; required_minor=20
     IFS='.' read -r got_major got_minor _ <<< "$go_version"
     if [[ "$got_major" -lt "$required_major" ]] || { [[ "$got_major" -eq "$required_major" ]] && [[ "${got_minor%%[^0-9]*}" -lt "$required_minor" ]]; }; then
-        error "Go >= 1.22 required, found $go_version."
+        error "Go >= 1.20 required, found $go_version."
     fi
 
     info "Building bytes-dns from source..."
@@ -70,13 +74,14 @@ fi
 
 # ── Install binary ───────────────────────────────────────────────────────────
 info "Installing binary to ${PREFIX}/bytes-dns ..."
+mkdir -p "${PREFIX}"
 install -m 755 "$BINARY" "${PREFIX}/bytes-dns"
 
 # ── Configure bytes-dns ───────────────────────────────────────────────────────
 if [[ ! -f "$config_file" ]] || grep -q 'YOUR_HETZNER_API_TOKEN' "$config_file" 2>/dev/null; then
     info "Launching interactive setup..."
     # Run setup as the target user to ensure correct file ownership.
-    sudo -u "$BYTES_DNS_USER" "${PREFIX}/bytes-dns" setup --config="$config_file"
+    "${PREFIX}/bytes-dns" setup --config="$config_file"
 fi
 
 # ── Read interval from config (if it exists already) ─────────────────────────
@@ -93,6 +98,7 @@ info "Systemd timer interval: ${interval_minutes} minute(s)."
 
 # ── Install systemd units ────────────────────────────────────────────────────
 info "Installing systemd units to ${SYSTEMD_DIR} ..."
+mkdir -p "${SYSTEMD_DIR}"
 
 # Service unit — replace %i template variable with the target user.
 service_name="bytes-dns@${BYTES_DNS_USER}.service"

@@ -25,10 +25,24 @@ func (m *hetznerMock) handler() http.Handler {
 			return
 		}
 
+		if r.Method == http.MethodPost {
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			body["id"] = 999
+			resp := map[string]any{"zone": body}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(resp)
+			return
+		}
+
 		name := r.URL.Query().Get("name")
 		var matched []map[string]any
 		for _, z := range m.zones {
-			if name == "" || z["name"] == name {
+			if name == "" || strings.EqualFold(z["name"].(string), name) {
 				matched = append(matched, z)
 			}
 		}
@@ -202,5 +216,91 @@ func TestCreateRRSet(t *testing.T) {
 	}
 	if created.Records[0].Value != "10.0.0.1" {
 		t.Errorf("created record value = %q, want %q", created.Records[0].Value, "10.0.0.1")
+	}
+}
+
+func TestFindZoneByRecord(t *testing.T) {
+	mock := &hetznerMock{
+		zones: []map[string]any{
+			{"id": 42, "name": "example.com"},
+			{"id": 43, "name": "sub.example.com"},
+			{"id": 44, "name": "other.org"},
+		},
+	}
+	client, _ := newTestClient(t, mock)
+
+	tests := []struct {
+		record string
+		wantID int
+	}{
+		{"home.example.com", 42},
+		{"home.sub.example.com", 43},
+		{"example.com", 42},
+		{"sub.example.com", 43},
+		{"other.org", 44},
+		{"www.other.org", 44},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.record, func(t *testing.T) {
+			zone, err := client.FindZoneByRecord(context.Background(), tt.record)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if zone.ID != tt.wantID {
+				t.Errorf("zone ID = %d, want %d", zone.ID, tt.wantID)
+			}
+		})
+	}
+}
+
+func TestCreateZone(t *testing.T) {
+	mock := &hetznerMock{}
+	client, _ := newTestClient(t, mock)
+
+	zone, err := client.CreateZone(context.Background(), "newzone.com", 3600)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if zone.Name != "newzone.com" {
+		t.Errorf("zone Name = %q, want %q", zone.Name, "newzone.com")
+	}
+	if zone.ID != 999 {
+		t.Errorf("zone ID = %d, want %d", zone.ID, 999)
+	}
+}
+
+func TestNew(t *testing.T) {
+	c := dns.New("test-token")
+	if c == nil {
+		t.Fatal("expected client, got nil")
+	}
+}
+
+func TestClient_AuthError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"message":"unauthorized"}`))
+	}))
+	defer srv.Close()
+
+	client := dns.NewWithBaseURL("wrong-token", srv.URL)
+	_, err := client.FindZone(context.Background(), "example.com")
+	if err == nil || !strings.Contains(err.Error(), "authentication failed") {
+		t.Errorf("expected auth error, got %v", err)
+	}
+}
+
+func TestClient_ForbiddenError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"message":"forbidden"}`))
+	}))
+	defer srv.Close()
+
+	client := dns.NewWithBaseURL("token", srv.URL)
+	_, err := client.FindZone(context.Background(), "example.com")
+	if err == nil || !strings.Contains(err.Error(), "access denied") {
+		t.Errorf("expected forbidden error, got %v", err)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bytes-commerce/bytes-dns/internal/config"
@@ -119,6 +120,45 @@ func TestLoad_MissingAPIToken(t *testing.T) {
 	}
 }
 
+func TestConfig_Save(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	cfg := &config.Config{
+		APIToken: "save-test",
+		Zone:     "example.com",
+		Record:   "home.example.com",
+	}
+	err := cfg.Save(path)
+	if err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load after Save failed: %v", err)
+	}
+	if loaded.APIToken != "save-test" {
+		t.Errorf("APIToken = %q, want %q", loaded.APIToken, "save-test")
+	}
+}
+
+func TestConfig_DefaultPaths(t *testing.T) {
+	dir, err := config.ConfigDir()
+	if err != nil {
+		t.Fatalf("ConfigDir failed: %v", err)
+	}
+	if dir == "" {
+		t.Error("ConfigDir returned empty string")
+	}
+	path, err := config.DefaultConfigPath()
+	if err != nil {
+		t.Fatalf("DefaultConfigPath failed: %v", err)
+	}
+	if !strings.Contains(path, "config.json") {
+		t.Errorf("DefaultConfigPath %q does not contain config.json", path)
+	}
+}
+
 func TestLoad_MissingZone(t *testing.T) {
 	m := validBase()
 	delete(m, "zone")
@@ -189,6 +229,16 @@ func TestLoad_InvalidIPSource(t *testing.T) {
 	_, err := config.Load(path)
 	if err == nil {
 		t.Fatal("expected validation error for invalid ip_source scheme, got nil")
+	}
+}
+
+func TestLoad_LocalhostIPSource(t *testing.T) {
+	m := validBase()
+	m["ip_source"] = "http://127.0.0.1:1234"
+	path := writeConfig(t, m, 0o600)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for localhost ip_source, got nil")
 	}
 }
 

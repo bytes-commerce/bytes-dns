@@ -27,5 +27,6 @@ Thumbs.db
 config.json.local
 state.json
 *.tmp
+.env
 .kilocodemodes
 .ai/

@@ -50,7 +50,7 @@ test:
 .PHONY: lint
 lint:
 	go vet ./...
-	@command -v staticcheck &>/dev/null && staticcheck ./... || echo "staticcheck not installed — skipping"
+	@command -v staticcheck &>/dev/null && staticcheck ./... || echo "staticcheck not installed - skipping"
 
 # Format code.
 .PHONY: fmt

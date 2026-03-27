@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# uninstall.sh — remove bytes-dns binary, systemd units, and optionally config.
+# uninstall.sh - remove bytes-dns binary, systemd units, and optionally config.
 #
 # Usage:
 #   sudo bash uninstall.sh              # uninstall for current user

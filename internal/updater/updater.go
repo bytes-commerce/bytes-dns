@@ -14,6 +14,7 @@ import (
 
 type dnsClient interface {
 	FindZone(ctx context.Context, zoneName string) (*dns.Zone, error)
+	FindZoneByRecord(ctx context.Context, recordName string) (*dns.Zone, error)
 	FindRRSet(ctx context.Context, zoneID, name, recordType string) (*dns.RRSet, error)
 	UpdateRRSet(ctx context.Context, zoneID string, rrset *dns.RRSet, newValue string) (*dns.RRSet, error)
 	CreateRRSet(ctx context.Context, zoneID, name, recordType, value string, ttl int) (*dns.RRSet, error)
@@ -71,20 +72,28 @@ func (u *Updater) Run(ctx context.Context, force bool) (*Result, error) {
 	logger.Info("detected public IP: %s", ipStr)
 
 	if !force && st.LastIP == ipStr {
-		logger.Info("IP unchanged (%s) — no update needed", ipStr)
+		logger.Info("IP unchanged (%s) - no update needed", ipStr)
 		_ = u.stateManager.MarkChecked(st)
 		return &Result{PublicIP: ipStr, Action: ActionNoChange}, nil
 	}
 
 	zoneID := u.cfg.ZoneID
 	if zoneID == "" {
-		zone, err := u.dnsClient.FindZone(ctx, u.cfg.Zone)
+		// Try to find the zone by record name (longest suffix match)
+		zone, err := u.dnsClient.FindZoneByRecord(ctx, u.cfg.Record)
 		if err != nil {
-			return nil, err
+			// Fallback to explicit zone lookup if record-based lookup fails
+			zone, err = u.dnsClient.FindZone(ctx, u.cfg.Zone)
+			if err != nil {
+				return nil, err
+			}
 		}
 		zoneID = fmt.Sprintf("%d", zone.ID)
 		u.cfg.ZoneID = zoneID
-		_ = u.cfg.Save("")
+		u.cfg.Zone = zone.Name // Update zone name in config to match the found zone
+		if err := u.cfg.Save(""); err != nil {
+			logger.Warn("failed to save resolved zone_id: %v", err)
+		}
 		logger.Debug("resolved zone %q => id=%s", u.cfg.Zone, zoneID)
 	}
 
@@ -153,14 +162,20 @@ func (u *Updater) Test(ctx context.Context) error {
 	zoneID := u.cfg.ZoneID
 	var zoneName = u.cfg.Zone
 	if zoneID == "" {
-		zone, err := u.dnsClient.FindZone(ctx, u.cfg.Zone)
+		zone, err := u.dnsClient.FindZoneByRecord(ctx, u.cfg.Record)
 		if err != nil {
-			return fmt.Errorf("zone lookup failed: %w", err)
+			zone, err = u.dnsClient.FindZone(ctx, u.cfg.Zone)
+			if err != nil {
+				return fmt.Errorf("zone lookup failed: %w", err)
+			}
 		}
 		zoneID = fmt.Sprintf("%d", zone.ID)
 		zoneName = zone.Name
 		u.cfg.ZoneID = zoneID
-		_ = u.cfg.Save("")
+		u.cfg.Zone = zoneName
+		if err := u.cfg.Save(""); err != nil {
+			logger.Warn("failed to save resolved zone_id: %v", err)
+		}
 	}
 	fmt.Printf("  zone       : %s (id=%s)\n", zoneName, zoneID)
 
