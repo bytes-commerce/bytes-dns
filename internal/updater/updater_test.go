@@ -21,7 +21,7 @@ func hetznerAPIHandler(existingRRSet *dns.RRSet) http.Handler {
 
 		switch {
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/zones") && !strings.Contains(r.URL.Path, "/rrsets"):
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"zones": []map[string]any{{"id": 42, "name": "example.com"}},
 				"meta":  map[string]any{"pagination": map[string]any{}},
 			})
@@ -38,17 +38,17 @@ func hetznerAPIHandler(existingRRSet *dns.RRSet) http.Handler {
 					"zone":    existingRRSet.Zone,
 				})
 			}
-			json.NewEncoder(w).Encode(map[string]any{"rrsets": rrsets, "meta": map[string]any{"pagination": map[string]any{}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"rrsets": rrsets, "meta": map[string]any{"pagination": map[string]any{}}})
 
 		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/rrsets/"):
 			w.WriteHeader(http.StatusOK)
 
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/rrsets"):
 			var body map[string]any
-			json.NewDecoder(r.Body).Decode(&body)
+			_ = json.NewDecoder(r.Body).Decode(&body)
 			body["id"] = "created-rrset-001"
 			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(map[string]any{"rrset": body})
+			_ = json.NewEncoder(w).Encode(map[string]any{"rrset": body})
 
 		default:
 			http.Error(w, "not found", http.StatusNotFound)

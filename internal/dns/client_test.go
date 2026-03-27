@@ -41,10 +41,15 @@ func (m *hetznerMock) handler() http.Handler {
 
 		name := r.URL.Query().Get("name")
 		var matched []map[string]any
-		for _, z := range m.zones {
-			if name == "" || strings.EqualFold(z["name"].(string), name) {
-				matched = append(matched, z)
+		matched = append(matched, m.zones...)
+		if name != "" {
+			var filtered []map[string]any
+			for _, z := range m.zones {
+				if strings.EqualFold(z["name"].(string), name) {
+					filtered = append(filtered, z)
+				}
 			}
+			matched = filtered
 		}
 
 		resp := map[string]any{
@@ -79,9 +84,7 @@ func (m *hetznerMock) handler() http.Handler {
 			}
 			// GET /v1/zones/{id}/rrsets
 			var matched []map[string]any
-			for _, rr := range m.rrsets {
-				matched = append(matched, rr)
-			}
+			matched = append(matched, m.rrsets...)
 			resp := map[string]any{"rrsets": matched, "meta": map[string]any{"pagination": map[string]any{}}}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(resp)
@@ -280,7 +283,7 @@ func TestNew(t *testing.T) {
 func TestClient_AuthError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"message":"unauthorized"}`))
+		_, _ = w.Write([]byte(`{"message":"unauthorized"}`))
 	}))
 	defer srv.Close()
 
@@ -294,7 +297,7 @@ func TestClient_AuthError(t *testing.T) {
 func TestClient_ForbiddenError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
-		w.Write([]byte(`{"message":"forbidden"}`))
+		_, _ = w.Write([]byte(`{"message":"forbidden"}`))
 	}))
 	defer srv.Close()
 

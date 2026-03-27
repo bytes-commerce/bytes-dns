@@ -276,11 +276,11 @@ func cmdSetup(args []string) {
 
 	if cfg.APIToken == "" {
 		fmt.Print("Hetzner API Token: ")
-		fmt.Scanln(&cfg.APIToken)
+		_, _ = fmt.Scanln(&cfg.APIToken)
 	} else {
 		fmt.Printf("Hetzner API Token (current: %s...): ", cfg.APIToken[:5])
 		var newToken string
-		fmt.Scanln(&newToken)
+		_, _ = fmt.Scanln(&newToken)
 		if newToken != "" {
 			cfg.APIToken = newToken
 		}
@@ -290,18 +290,18 @@ func cmdSetup(args []string) {
 	ctx := context.Background()
 
 	fmt.Print("Target Domain (e.g. home.example.com): ")
-	fmt.Scanln(&cfg.Record)
+	_, _ = fmt.Scanln(&cfg.Record)
 
 	fmt.Print("Zone Name (e.g. example.com): ")
 	var inputZone string
-	fmt.Scanln(&inputZone)
+	_, _ = fmt.Scanln(&inputZone)
 	if inputZone != "" {
 		cfg.Zone = inputZone
 	}
 
 	if cfg.Zone == "" {
 		fmt.Print("Zone Name (e.g. example.com): ")
-		fmt.Scanln(&cfg.Zone)
+		_, _ = fmt.Scanln(&cfg.Zone)
 	}
 
 	zone, err := dnsClient.FindZoneByRecord(ctx, cfg.Record)
@@ -312,7 +312,7 @@ func cmdSetup(args []string) {
 	if err != nil {
 		fmt.Printf("Zone %q not found. Do you want to create it? (y/n): ", cfg.Zone)
 		var confirm string
-		fmt.Scanln(&confirm)
+		_, _ = fmt.Scanln(&confirm)
 		if strings.ToLower(confirm) == "y" {
 			if !strings.Contains(cfg.Zone, ".") {
 				fmt.Fprintf(os.Stderr, "Error: %q does not look like a valid zone name (must contain at least one dot).\n", cfg.Zone)
@@ -342,7 +342,7 @@ func cmdSetup(args []string) {
 
 	fmt.Printf("Record Type (A or AAAA) [current: %s]: ", cfg.RecordType)
 	var inputType string
-	fmt.Scanln(&inputType)
+	_, _ = fmt.Scanln(&inputType)
 	if inputType != "" {
 		cfg.RecordType = strings.ToUpper(inputType)
 	}
