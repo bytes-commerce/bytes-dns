@@ -39,8 +39,6 @@ func NewWithBaseURL(token, baseURL string) *Client {
 
 func (c *Client) FindZone(ctx context.Context, zoneName string) (*Zone, error) {
 	params := url.Values{
-		"name":     {zoneName},
-		"mode":     {"primary"},
 		"per_page": {"999"},
 	}
 	endpoint := fmt.Sprintf("%s/zones?%s", c.apiBase, params.Encode())
@@ -56,7 +54,50 @@ func (c *Client) FindZone(ctx context.Context, zoneName string) (*Zone, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("zone %q not found — verify the zone exists in your Hetzner account and the API token has access", zoneName)
+	return nil, fmt.Errorf("zone %q not found - verify the zone exists in your Hetzner account and the API token has access", zoneName)
+}
+
+func (c *Client) FindZoneByRecord(ctx context.Context, recordName string) (*Zone, error) {
+	params := url.Values{
+		"per_page": {"999"},
+	}
+	endpoint := fmt.Sprintf("%s/zones?%s", c.apiBase, params.Encode())
+
+	var result zonesResponse
+	if err := c.get(ctx, endpoint, &result); err != nil {
+		return nil, fmt.Errorf("listing zones: %w", err)
+	}
+
+	record := strings.ToLower(strings.TrimRight(recordName, "."))
+	var bestMatch *Zone
+	for i := range result.Zones {
+		z := &result.Zones[i]
+		zoneName := strings.ToLower(strings.TrimRight(z.Name, "."))
+		if record == zoneName || strings.HasSuffix(record, "."+zoneName) {
+			if bestMatch == nil || len(zoneName) > len(bestMatch.Name) {
+				bestMatch = z
+			}
+		}
+	}
+
+	if bestMatch != nil {
+		return bestMatch, nil
+	}
+
+	return nil, fmt.Errorf("no matching zone found for record %q in your Hetzner account", recordName)
+}
+
+func (c *Client) CreateZone(ctx context.Context, name string, ttl int) (*Zone, error) {
+	req := CreateZoneRequest{
+		Name: name,
+		TTL:  ttl,
+	}
+	var resp createZoneResponse
+	endpoint := fmt.Sprintf("%s/zones", c.apiBase)
+	if err := c.post(ctx, endpoint, req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp.Zone, nil
 }
 
 func (c *Client) ListRRSets(ctx context.Context, zoneID string, name string, recordType string) ([]RRSet, error) {

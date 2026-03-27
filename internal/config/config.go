@@ -86,7 +86,7 @@ func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("config file not found at %s — run 'bytes-dns install' or create it manually", path)
+			return nil, fmt.Errorf("config file not found at %s - run 'bytes-dns install' or create it manually", path)
 		}
 		return nil, fmt.Errorf("cannot read config file %s: %w", path, err)
 	}
@@ -175,12 +175,15 @@ func validate(cfg *Config) error {
 		if !strings.HasPrefix(cfg.IPSource, "https://") && !strings.HasPrefix(cfg.IPSource, "http://") {
 			errs = append(errs, "ip_source must be a valid http:// or https:// URL")
 		}
+		if strings.Contains(cfg.IPSource, "://127.0.0.1") || strings.Contains(cfg.IPSource, "://localhost") {
+			errs = append(errs, "ip_source cannot be a localhost address")
+		}
 	}
 
 	if cfg.Zone != "" && cfg.Record != "" {
 		record := strings.TrimRight(cfg.Record, ".")
 		zone := strings.TrimRight(cfg.Zone, ".")
-		if !strings.HasSuffix(strings.ToLower(record), strings.ToLower(zone)) {
+		if !strings.EqualFold(record, zone) && !strings.HasSuffix(strings.ToLower(record), "."+strings.ToLower(zone)) {
 			errs = append(errs, fmt.Sprintf("record %q must be within zone %q", cfg.Record, cfg.Zone))
 		}
 	}
@@ -199,7 +202,7 @@ func checkFilePermissions(path string) error {
 	mode := info.Mode().Perm()
 	if mode&0o044 != 0 {
 		return fmt.Errorf(
-			"config file %s is readable by group or others (mode %04o) — "+
+			"config file %s is readable by group or others (mode %04o) - "+
 				"run: chmod 600 %s",
 			path, mode, path,
 		)

@@ -21,7 +21,7 @@ func hetznerAPIHandler(existingRRSet *dns.RRSet) http.Handler {
 
 		switch {
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/zones") && !strings.Contains(r.URL.Path, "/rrsets"):
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"zones": []map[string]any{{"id": 42, "name": "example.com"}},
 				"meta":  map[string]any{"pagination": map[string]any{}},
 			})
@@ -38,17 +38,17 @@ func hetznerAPIHandler(existingRRSet *dns.RRSet) http.Handler {
 					"zone":    existingRRSet.Zone,
 				})
 			}
-			json.NewEncoder(w).Encode(map[string]any{"rrsets": rrsets, "meta": map[string]any{"pagination": map[string]any{}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"rrsets": rrsets, "meta": map[string]any{"pagination": map[string]any{}}})
 
 		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/rrsets/"):
 			w.WriteHeader(http.StatusOK)
 
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/rrsets"):
 			var body map[string]any
-			json.NewDecoder(r.Body).Decode(&body)
+			_ = json.NewDecoder(r.Body).Decode(&body)
 			body["id"] = "created-rrset-001"
 			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(map[string]any{"rrset": body})
+			_ = json.NewEncoder(w).Encode(map[string]any{"rrset": body})
 
 		default:
 			http.Error(w, "not found", http.StatusNotFound)
@@ -208,5 +208,42 @@ func TestRun_DryRunCreate(t *testing.T) {
 	}
 	if result.Action != updater.ActionCreated {
 		t.Errorf("action = %q, want %q", result.Action, updater.ActionCreated)
+	}
+}
+
+func TestNew(t *testing.T) {
+	cfg := &config.Config{APIToken: "test-token"}
+	dir := t.TempDir()
+	sm := state.New(filepath.Join(dir, "state.json"))
+	u := updater.New(cfg, sm)
+	if u == nil {
+		t.Fatal("expected updater to be created")
+	}
+}
+
+func TestTest(t *testing.T) {
+	u, _ := setupServers(t, "5.6.7.8", nil)
+	err := u.Test(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDetectIP_UnsupportedType(t *testing.T) {
+	ipSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("5.6.7.8"))
+	}))
+	t.Cleanup(ipSrv.Close)
+
+	cfg := &config.Config{
+		RecordType: "MX",
+		IPSource:   ipSrv.URL,
+	}
+	dir := t.TempDir()
+	sm := state.New(filepath.Join(dir, "state.json"))
+	u := updater.NewWithDNSClient(cfg, sm, nil)
+	_, err := u.Run(context.Background(), false)
+	if err == nil || !strings.Contains(err.Error(), "unsupported record_type") {
+		t.Errorf("expected unsupported record_type error, got %v", err)
 	}
 }

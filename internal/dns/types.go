@@ -62,3 +62,12 @@ type createRRSetRequest struct {
 type updateRRSetRequest struct {
 	Records []RecordValue `json:"records"`
 }
+
+type CreateZoneRequest struct {
+	Name string `json:"name"`
+	TTL  int    `json:"ttl,omitempty"`
+}
+
+type createZoneResponse struct {
+	Zone Zone `json:"zone"`
+}
