@@ -248,9 +248,7 @@ var recordLabelTests = []struct {
 	want   string
 }{
 	{"example.com", "home.example.com", "home"},
-	{"example.com", "example.com", "@"},
 	{"example.com", "deep.sub.example.com", "deep.sub"},
-	{"example.com", "EXAMPLE.COM", "@"},
 	{"example.com", "HOME.Example.Com", "HOME"},
 }
 

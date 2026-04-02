@@ -79,10 +79,8 @@ func (u *Updater) Run(ctx context.Context, force bool) (*Result, error) {
 
 	zoneID := u.cfg.ZoneID
 	if zoneID == "" {
-		// Try to find the zone by record name (longest suffix match)
 		zone, err := u.dnsClient.FindZoneByRecord(ctx, u.cfg.Record)
 		if err != nil {
-			// Fallback to explicit zone lookup if record-based lookup fails
 			zone, err = u.dnsClient.FindZone(ctx, u.cfg.Zone)
 			if err != nil {
 				return nil, err
@@ -90,7 +88,7 @@ func (u *Updater) Run(ctx context.Context, force bool) (*Result, error) {
 		}
 		zoneID = fmt.Sprintf("%d", zone.ID)
 		u.cfg.ZoneID = zoneID
-		u.cfg.Zone = zone.Name // Update zone name in config to match the found zone
+		u.cfg.Zone = zone.Name
 		if err := u.cfg.Save(""); err != nil {
 			logger.Warn("failed to save resolved zone_id: %v", err)
 		}
@@ -99,6 +97,10 @@ func (u *Updater) Run(ctx context.Context, force bool) (*Result, error) {
 
 	label := u.cfg.RecordLabel()
 	logger.Debug("record label: %q (record=%s, zone=%s)", label, u.cfg.Record, u.cfg.Zone)
+
+	if label == "@" {
+		return nil, fmt.Errorf("refusing to operate on zone apex record %q — use a subdomain instead (e.g. \"home.%s\")", u.cfg.Record, u.cfg.Zone)
+	}
 
 	rrset, err := u.dnsClient.FindRRSet(ctx, zoneID, label, u.cfg.RecordType)
 	if err != nil {
@@ -171,15 +173,13 @@ func (u *Updater) Test(ctx context.Context) error {
 		}
 		zoneID = fmt.Sprintf("%d", zone.ID)
 		zoneName = zone.Name
-		u.cfg.ZoneID = zoneID
-		u.cfg.Zone = zoneName
-		if err := u.cfg.Save(""); err != nil {
-			logger.Warn("failed to save resolved zone_id: %v", err)
-		}
 	}
 	fmt.Printf("  zone       : %s (id=%s)\n", zoneName, zoneID)
 
 	label := u.cfg.RecordLabel()
+	if label == "@" {
+		return fmt.Errorf("record %q is the zone apex — test cannot operate on zone apex records; use a subdomain instead (e.g. \"home.%s\")", u.cfg.Record, u.cfg.Zone)
+	}
 	fmt.Printf("  record     : %s %s (label=%q)\n", u.cfg.RecordType, u.cfg.Record, label)
 
 	rrset, err := u.dnsClient.FindRRSet(ctx, zoneID, label, u.cfg.RecordType)
@@ -205,10 +205,8 @@ func (u *Updater) Test(ctx context.Context) error {
 }
 
 func (u *Updater) detectIP(ctx context.Context) (net.IP, error) {
-	var (
-		currentIP net.IP
-		err       error
-	)
+	var currentIP net.IP
+	var err error
 
 	switch u.cfg.RecordType {
 	case "A":
