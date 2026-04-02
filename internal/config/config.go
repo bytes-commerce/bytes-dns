@@ -186,6 +186,9 @@ func validate(cfg *Config) error {
 		if !strings.EqualFold(record, zone) && !strings.HasSuffix(strings.ToLower(record), "."+strings.ToLower(zone)) {
 			errs = append(errs, fmt.Sprintf("record %q must be within zone %q", cfg.Record, cfg.Zone))
 		}
+		if strings.EqualFold(record, zone) {
+			errs = append(errs, fmt.Sprintf("record %q is the zone apex — use a subdomain (e.g. \"home.%s\")", cfg.Record, cfg.Zone))
+		}
 	}
 
 	if len(errs) > 0 {

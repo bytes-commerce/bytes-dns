@@ -10,11 +10,11 @@ import (
 )
 
 type State struct {
-	LastIP        string    `json:"last_ip"`
-	LastRecordID  string    `json:"last_record_id"`
-	LastUpdated   time.Time `json:"last_updated"`
-	LastChecked   time.Time `json:"last_checked"`
-	LastSyncedIP  string    `json:"last_synced_ip"`
+	LastIP       string    `json:"last_ip"`
+	LastRecordID string    `json:"last_record_id"`
+	LastUpdated  time.Time `json:"last_updated"`
+	LastChecked  time.Time `json:"last_checked"`
+	LastSyncedIP string    `json:"last_synced_ip"`
 }
 
 type Manager struct {
