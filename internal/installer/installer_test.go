@@ -65,7 +65,7 @@ func TestInstaller_InstallWritesUnitsAndRecordsSystemctlCalls(t *testing.T) {
 
 func TestInstaller_InstallReturnsErrorWhenNotRoot(t *testing.T) {
 	inst := &Installer{
-		RootCheck: func() error { return errNotRoot },
+		RootCheck: func() error { return ErrNotRoot },
 	}
 	if err := inst.Install(context.Background()); err == nil {
 		t.Fatal("expected error when not root, got nil")

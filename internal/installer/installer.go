@@ -19,7 +19,8 @@ var serviceTemplate string
 //go:embed assets/bytes-dns.timer
 var timerTemplate string
 
-var errNotRoot = errors.New("installer must be run as root")
+// ErrNotRoot is returned when the installer is run without root privileges.
+var ErrNotRoot = errors.New("installer must be run as root")
 
 // Installer performs the bytes-dns install or uninstall on a Linux system.
 // All file paths and external commands are overridable for testing.
@@ -158,7 +159,7 @@ func renderTimer(template []byte, intervalMins int) string {
 
 func defaultRootCheck() error {
 	if os.Getuid() != 0 {
-		return errNotRoot
+		return ErrNotRoot
 	}
 	return nil
 }
