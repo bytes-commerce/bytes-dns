@@ -214,7 +214,7 @@ sudo systemctl enable --now "bytes-dns@youruser.timer"
 
 ### Timer behavior
 
-- Fires **2 minutes** after every boot (catches IP changes from restarts)
+- Fires **1 minute** after every boot (catches IP changes from restarts)
 - Fires every **`interval_minutes`** thereafter (default: 5 min)
 - Up to 30-second randomised delay to avoid thundering herd
 - `Persistent=true` — catches up if the system was off when the timer fired

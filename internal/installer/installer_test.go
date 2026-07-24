@@ -42,7 +42,7 @@ func TestInstaller_InstallWritesUnitsAndRecordsSystemctlCalls(t *testing.T) {
 	// Verify timer is templated with the user.
 	svcBytes, _ := readFile(svcPath)
 	if !strings.Contains(string(svcBytes), "User=%i") {
-		// %i is at template level — actual file is the template, not the instance.
+		t.Errorf("service file should template User=%%i; got: %s", string(svcBytes))
 	}
 	timerBytes, _ := readFile(timerPath)
 	timerStr := string(timerBytes)
