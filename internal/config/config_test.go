@@ -306,3 +306,61 @@ func TestIsPrivateIP(t *testing.T) {
 		})
 	}
 }
+
+func TestLoad_IPSourceCommaList(t *testing.T) {
+	m := validBase()
+	m["ip_source"] = "https://a.example.com/ip,https://b.example.com/ip,https://c.example.com/ip"
+	path := writeConfig(t, m, 0o600)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error for comma-separated ip_source: %v", err)
+	}
+	got := cfg.IPSources()
+	want := []string{"https://a.example.com/ip", "https://b.example.com/ip", "https://c.example.com/ip"}
+	if len(got) != len(want) {
+		t.Fatalf("IPSources() len = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("IPSources()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestLoad_IPSourceSingleValueStillAllowed(t *testing.T) {
+	m := validBase()
+	m["ip_source"] = "https://api4.my-ip.io/ip.txt"
+	path := writeConfig(t, m, 0o600)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error for single ip_source: %v", err)
+	}
+	got := cfg.IPSources()
+	if len(got) != 1 || got[0] != "https://api4.my-ip.io/ip.txt" {
+		t.Errorf("IPSources() = %v, want [https://api4.my-ip.io/ip.txt]", got)
+	}
+}
+
+func TestLoad_IPSourceRejectsBadFirstURL(t *testing.T) {
+	m := validBase()
+	m["ip_source"] = "ftp://bad.example.com/ip,https://good.example.com/ip"
+	path := writeConfig(t, m, 0o600)
+	if _, err := config.Load(path); err == nil {
+		t.Fatal("expected validation error when first ip_source URL is not http(s), got nil")
+	}
+}
+
+func TestLoad_IPSourceEmptyEntriesIgnored(t *testing.T) {
+	m := validBase()
+	m["ip_source"] = "https://a.example.com/ip,,https://b.example.com/ip,"
+	path := writeConfig(t, m, 0o600)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := cfg.IPSources()
+	want := []string{"https://a.example.com/ip", "https://b.example.com/ip"}
+	if len(got) != len(want) {
+		t.Errorf("IPSources() = %v, want %v", got, want)
+	}
+}

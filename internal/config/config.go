@@ -13,9 +13,10 @@ import (
 const (
 	DefaultTTL             = 60
 	DefaultIntervalMinutes = 5
-	DefaultIPSource        = "https://api4.my-ip.io/ip.txt"
-	DefaultLogLevel        = "info"
-	DefaultRecordType      = "A"
+	// DefaultIPSource is the first URL tried; the rest are fallbacks.
+	DefaultIPSource   = "https://api4.my-ip.io/ip.txt,https://ifconfig.co/ip,https://checkip.amazonaws.com"
+	DefaultLogLevel   = "info"
+	DefaultRecordType = "A"
 )
 
 type Config struct {
@@ -126,6 +127,26 @@ func (c *Config) RecordLabel() string {
 	return record
 }
 
+// IPSources returns the configured IP source URLs in priority order.
+// Empty entries are skipped. Returns at least one entry if IPSource is non-empty.
+func (c *Config) IPSources() []string {
+	if c.IPSource == "" {
+		return strings.Split(DefaultIPSource, ",")
+	}
+	parts := strings.Split(c.IPSource, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return strings.Split(DefaultIPSource, ",")
+	}
+	return out
+}
+
 func applyDefaults(cfg *Config) {
 	if cfg.TTL == 0 {
 		cfg.TTL = DefaultTTL
@@ -172,10 +193,11 @@ func validate(cfg *Config) error {
 	}
 
 	if cfg.IPSource != "" {
-		if !strings.HasPrefix(cfg.IPSource, "https://") && !strings.HasPrefix(cfg.IPSource, "http://") {
+		first := cfg.IPSources()[0]
+		if !strings.HasPrefix(first, "https://") && !strings.HasPrefix(first, "http://") {
 			errs = append(errs, "ip_source must be a valid http:// or https:// URL")
 		}
-		if strings.Contains(cfg.IPSource, "://127.0.0.1") || strings.Contains(cfg.IPSource, "://localhost") {
+		if strings.Contains(first, "://127.0.0.1") || strings.Contains(first, "://localhost") {
 			errs = append(errs, "ip_source cannot be a localhost address")
 		}
 	}
