@@ -307,3 +307,88 @@ func TestClient_ForbiddenError(t *testing.T) {
 		t.Errorf("expected forbidden error, got %v", err)
 	}
 }
+
+func TestClient_RetriesOn5xx(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"zones":[{"id":42,"name":"example.com"}],"meta":{}}`))
+	}))
+	defer srv.Close()
+
+	client := dns.NewWithBaseURL("token", srv.URL)
+	zone, err := client.FindZone(context.Background(), "example.com")
+	if err != nil {
+		t.Fatalf("unexpected error after retries: %v", err)
+	}
+	if zone.ID != 42 {
+		t.Errorf("zone ID = %d, want 42", zone.ID)
+	}
+	if calls != 3 {
+		t.Errorf("calls = %d, want 3 (succeeded on 3rd attempt)", calls)
+	}
+}
+
+func TestClient_DoesNotRetryOn401(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	client := dns.NewWithBaseURL("wrong", srv.URL)
+	_, err := client.FindZone(context.Background(), "example.com")
+	if err == nil {
+		t.Fatal("expected 401 error, got nil")
+	}
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1 (no retry on 401)", calls)
+	}
+}
+
+func TestClient_RetriesOn429(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < 2 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"zones":[{"id":42,"name":"anything"}],"meta":{}}`))
+	}))
+	defer srv.Close()
+
+	client := dns.NewWithBaseURL("token", srv.URL)
+	_, err := client.FindZone(context.Background(), "anything")
+	if err != nil {
+		t.Fatalf("unexpected error after retry on 429: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("calls = %d, want 2 (retried once on 429)", calls)
+	}
+}
+
+func TestClient_GivesUpAfter3Attempts(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	client := dns.NewWithBaseURL("token", srv.URL)
+	_, err := client.FindZone(context.Background(), "anything")
+	if err == nil {
+		t.Fatal("expected error after exhausting retries, got nil")
+	}
+	if calls != 3 {
+		t.Errorf("calls = %d, want 3 (final attempt)", calls)
+	}
+}
