@@ -28,9 +28,6 @@ const (
 
 	acceptHeader = "application/vnd.github+json"
 	userAgentFmt = "bytes-dns/%s"
-
-	updateGOOS   = "linux"
-	updateGOARCH = runtime.GOARCH
 )
 
 // ErrNotRoot is returned when the updater is run without root privileges.
@@ -343,7 +340,7 @@ func (u *Updater) Update(ctx context.Context, opts UpdateOptions) (*Result, erro
 		return result, nil
 	}
 
-	asset, err := u.FindAsset(rel, updateGOOS, updateGOARCH, os.Getenv("GOARM"))
+	asset, err := u.FindAsset(rel, runtime.GOOS, runtime.GOARCH, os.Getenv("GOARM"))
 	if err != nil {
 		return nil, err
 	}

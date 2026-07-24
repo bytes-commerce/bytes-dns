@@ -39,8 +39,11 @@ func TestUpdate_SkipsWhenSameVersion(t *testing.T) {
 }
 
 func TestUpdate_ForceReinstalls(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skipf("TestUpdate_ForceReinstalls requires linux prebuilt asset; current GOOS=%s", runtime.GOOS)
+	}
 	binary := []byte("NEW")
-	assetName := assetForPlatform("linux", runtime.GOARCH, os.Getenv("GOARM"))
+	assetName := assetForPlatform(runtime.GOOS, runtime.GOARCH, os.Getenv("GOARM"))
 	checksum := fmt.Sprintf("%x  %s\n", sha256.Sum256(binary), assetName)
 
 	var httpCalls int
