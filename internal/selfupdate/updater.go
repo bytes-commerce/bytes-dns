@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 )
@@ -70,6 +71,10 @@ type Options struct {
 	// httpGet overrides the HTTP GET hook (for tests). When nil,
 	// defaultHTTPGet is used.
 	httpGet func(ctx context.Context, url, accept, userAgent string, maxBytes int) ([]byte, error)
+
+	// runCommand overrides command execution (for tests). When nil,
+	// defaultRunCommand is used.
+	runCommand func(ctx context.Context, name string, args ...string) (string, error)
 }
 
 // New returns an Updater configured for the bytes-commerce/bytes-dns repo.
@@ -77,6 +82,10 @@ func New(opts Options) *Updater {
 	httpGet := opts.httpGet
 	if httpGet == nil {
 		httpGet = defaultHTTPGet
+	}
+	runCommand := opts.runCommand
+	if runCommand == nil {
+		runCommand = defaultRunCommand
 	}
 	return &Updater{
 		Owner:      opts.RepoOwner,
@@ -87,7 +96,7 @@ func New(opts Options) *Updater {
 		User:       opts.User,
 		RootCheck:  defaultRootCheck,
 		httpGet:    httpGet,
-		runCommand: defaultRunCommand,
+		runCommand: runCommand,
 		osRename:   defaultOsRename,
 	}
 }
@@ -190,9 +199,36 @@ func defaultHTTPGet(ctx context.Context, url, accept, userAgent string, maxBytes
 	return io.ReadAll(io.LimitReader(resp.Body, int64(maxBytes)))
 }
 
+// Preflight executes the staged binary and verifies that its --version output
+// reports a non-empty version string. This is a sanity check before swapping
+// the binary in place.
+func (u *Updater) Preflight(ctx context.Context, binPath string) error {
+	out, err := u.runCommand(ctx, binPath, "version")
+	if err != nil {
+		return fmt.Errorf("executing %s --version: %w", binPath, err)
+	}
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return fmt.Errorf("%s --version returned empty output", binPath)
+	}
+	// Sanity: the output should contain a digit (version number).
+	hasDigit := false
+	for _, r := range out {
+		if r >= '0' && r <= '9' {
+			hasDigit = true
+			break
+		}
+	}
+	if !hasDigit {
+		return fmt.Errorf("version mismatch: %s --version output does not look like a version string: %q", binPath, out)
+	}
+	return nil
+}
+
 func defaultRunCommand(ctx context.Context, name string, args ...string) (string, error) {
-	// Implemented in Task 4 (used by Pre-flight).
-	return "", nil
+	cmd := exec.CommandContext(ctx, name, args...)
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
 }
 
 func defaultOsRename(oldPath, newPath string) error {

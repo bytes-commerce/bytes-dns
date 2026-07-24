@@ -114,6 +114,12 @@ func TestVerifyChecksum_Mismatch(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
+func TestVerifyChecksum_MissingEntry(t *testing.T) {
+	err := verifyChecksum([]byte("hello\n"), "bytes-dns-linux-amd64", []byte("5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03  other-asset\n"))
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
 func TestPreflight_Success(t *testing.T) {
 	dir := t.TempDir()
 	binPath := filepath.Join(dir, "bytes-dns.new")
