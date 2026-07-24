@@ -92,14 +92,11 @@ cd bytes-dns
 
 # Build and install binary + systemd units in one step:
 sudo bash install.sh
+# OR, if bytes-dns is already on PATH:
+sudo bytes-dns install
 ```
 
-`install.sh` will:
-1. Build the binary from source (`go build`)
-2. Install it to `/usr/local/bin/bytes-dns`
-3. Install systemd service and timer unit templates
-4. Enable and start the timer for the current user
-5. Launch an interactive setup if no config exists
+Both commands perform the same install: copy the binary to `/usr/local/bin/bytes-dns`, install systemd service and timer unit templates, enable and start the timer for the current user, and prompt for setup if no config exists.
 
 ---
 
@@ -150,7 +147,7 @@ $EDITOR ~/.bytes-dns/config.json
 | `record_type`      | ❌        | `A`                              | Record type: `A` (IPv4) or `AAAA` (IPv6) |
 | `ttl`              | ❌        | `60`                             | DNS TTL in seconds |
 | `interval_minutes` | ❌        | `5`                              | Timer interval; used by `install.sh` |
-| `ip_source`        | ❌        | `https://api4.my-ip.io/ip.txt`   | URL returning the public IP as plain text |
+| `ip_source`        | ❌        | `https://api4.my-ip.io/ip.txt,https://ifconfig.co/ip,https://checkip.amazonaws.com` | Comma-separated list of URLs (tried in order) returning the public IP as plain text |
 | `log_level`        | ❌        | `info`                           | `debug`, `info`, `warn`, `error` |
 | `allow_private_ip` | ❌        | `false`                          | Set `true` only for NAT/internal setups |
 | `dry_run`          | ❌        | `false`                          | Preview changes without writing to Hetzner |
@@ -192,8 +189,8 @@ bytes-dns run --dry-run    # Preview without writing
 bytes-dns test             # Full connectivity and config test
 bytes-dns setup            # Interactive configuration wizard
 bytes-dns status           # Show current state and systemd timer status
-bytes-dns install          # Print installation instructions
-bytes-dns uninstall        # Print uninstallation instructions
+bytes-dns install          # Install binary, systemd units, and enable timer (requires root)
+bytes-dns uninstall        # Remove systemd units and binary (requires root)
 bytes-dns version          # Print version, commit, and Go runtime info
 ```
 
