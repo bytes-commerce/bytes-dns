@@ -52,7 +52,7 @@ func NewWithDNSClient(cfg *config.Config, sm *state.Manager, client dnsClient) *
 	return &Updater{
 		cfg:          cfg,
 		dnsClient:    client,
-		ipDetector:   ip.New(cfg.IPSource),
+		ipDetector:   ip.NewWithSources(cfg.IPSources()),
 		stateManager: sm,
 	}
 }

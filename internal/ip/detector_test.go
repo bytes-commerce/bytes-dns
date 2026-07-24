@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/bytes-commerce/bytes-dns/internal/ip"
@@ -15,6 +16,56 @@ func serve(t *testing.T, body string, status int) *httptest.Server {
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(body))
 	}))
+}
+
+func TestDetectIPv4_FallbackOnFirstSourceFailure(t *testing.T) {
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(failing.Close)
+
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("203.0.113.42"))
+	}))
+	t.Cleanup(good.Close)
+
+	d := ip.NewWithSources([]string{failing.URL, good.URL})
+	got, err := d.DetectIPv4(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.String() != "203.0.113.42" {
+		t.Errorf("got IP %q, want %q", got, "203.0.113.42")
+	}
+}
+
+func TestDetectIPv4_FallbackOnNetworkError(t *testing.T) {
+	// Unroutable port that refuses connections.
+	d := ip.NewWithSources([]string{"http://127.0.0.1:1", "http://127.0.0.1:1"})
+	if _, err := d.DetectIPv4(context.Background()); err == nil {
+		t.Fatal("expected error when all sources fail, got nil")
+	}
+}
+
+func TestDetectIPv4_RecordsAllSourceErrors(t *testing.T) {
+	srv1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv1.Close)
+
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("not-an-ip"))
+	}))
+	t.Cleanup(srv2.Close)
+
+	d := ip.NewWithSources([]string{srv1.URL, srv2.URL})
+	_, err := d.DetectIPv4(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), srv1.URL) || !strings.Contains(err.Error(), srv2.URL) {
+		t.Errorf("expected error to mention both sources, got: %v", err)
+	}
 }
 
 func TestDetectIPv4_Valid(t *testing.T) {
