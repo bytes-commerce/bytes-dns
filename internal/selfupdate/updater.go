@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -27,6 +28,9 @@ const (
 
 	acceptHeader = "application/vnd.github+json"
 	userAgentFmt = "bytes-dns/%s"
+
+	updateGOOS   = "linux"
+	updateGOARCH = runtime.GOARCH
 )
 
 // ErrNotRoot is returned when the updater is run without root privileges.
@@ -279,6 +283,97 @@ func (u *Updater) Apply(ctx context.Context, stagedPath, oldVer string) error {
 
 func defaultOsRename(oldPath, newPath string) error {
 	return os.Rename(oldPath, newPath)
+}
+
+// Action describes what an update did.
+type Action string
+
+const (
+	ActionNoChange Action = "no_change"
+	ActionUpdated  Action = "updated"
+	ActionError    Action = "error"
+)
+
+// UpdateOptions configures a single Update call.
+type UpdateOptions struct {
+	Force bool // re-install even if version matches
+	Check bool // dry-run: just compare versions
+}
+
+// Result describes the outcome of an Update or Check call.
+type Result struct {
+	Action          Action
+	Current         string
+	Latest          string
+	Platform        string
+	UpdateAvailable bool
+}
+
+// Check fetches the latest release and reports whether an update is available.
+func (u *Updater) Check(ctx context.Context) (*Result, error) {
+	rel, err := u.Latest(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &Result{
+		Action:          ActionNoChange,
+		Current:         u.Version,
+		Latest:          rel.Tag,
+		Platform:        fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH),
+		UpdateAvailable: u.Version != rel.Tag,
+	}, nil
+}
+
+// Update fetches the latest release and, when needed, downloads, verifies,
+// stages, preflights, and atomically applies its platform asset.
+func (u *Updater) Update(ctx context.Context, opts UpdateOptions) (*Result, error) {
+	rel, err := u.Latest(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &Result{
+		Action:          ActionNoChange,
+		Current:         u.Version,
+		Latest:          rel.Tag,
+		Platform:        fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH),
+		UpdateAvailable: u.Version != rel.Tag,
+	}
+	if opts.Check || (u.Version == rel.Tag && !opts.Force) {
+		return result, nil
+	}
+
+	asset, err := u.FindAsset(rel, updateGOOS, updateGOARCH, os.Getenv("GOARM"))
+	if err != nil {
+		return nil, err
+	}
+	body, err := u.Download(ctx, *asset)
+	if err != nil {
+		return nil, err
+	}
+	checksums, err := u.FetchChecksums(ctx, rel)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyChecksum(body, asset.Name, checksums); err != nil {
+		return nil, err
+	}
+
+	stagedPath := filepath.Join(u.BinaryDir, "bytes-dns.new")
+	if err := os.WriteFile(stagedPath, body, 0o644); err != nil {
+		return nil, fmt.Errorf("staging new binary: %w", err)
+	}
+	defer os.Remove(stagedPath)
+
+	if err := u.Preflight(ctx, stagedPath); err != nil {
+		return nil, err
+	}
+	if err := u.Apply(ctx, stagedPath, u.Version); err != nil {
+		return nil, err
+	}
+
+	result.Action = ActionUpdated
+	return result, nil
 }
 
 // Download fetches the asset's bytes.

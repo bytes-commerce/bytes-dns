@@ -2,15 +2,131 @@ package selfupdate
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
+func TestUpdate_SkipsWhenSameVersion(t *testing.T) {
+	var httpCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tag_name": "v1.0.0", "assets": []}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	u := New(Options{
+		Version: "1.0.0",
+		BaseURL: srv.URL,
+	})
+	result, err := u.Update(context.Background(), UpdateOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != ActionNoChange {
+		t.Errorf("Action = %q, want %q", result.Action, ActionNoChange)
+	}
+	if httpCalls != 1 {
+		t.Errorf("expected exactly 1 HTTP call (latest release), got %d", httpCalls)
+	}
+}
+
+func TestUpdate_ForceReinstalls(t *testing.T) {
+	binary := []byte("NEW")
+	assetName := assetForPlatform("linux", runtime.GOARCH, os.Getenv("GOARM"))
+	checksum := fmt.Sprintf("%x  %s\n", sha256.Sum256(binary), assetName)
+
+	var httpCalls int
+	var serverURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpCalls++
+		switch r.URL.Path {
+		case "/repos///releases/latest":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{
+				"tag_name": "v1.0.0",
+				"assets": [
+					{"name": "%s", "browser_download_url": %q},
+					{"name": "checksums.txt", "browser_download_url": %q}
+				]
+			}`, assetName, serverURL+"/bin", serverURL+"/cs")
+		case "/bin":
+			_, _ = w.Write(binary)
+		case "/cs":
+			_, _ = w.Write([]byte(checksum))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	serverURL = srv.URL
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "bytes-dns")
+	_ = os.WriteFile(dest, []byte("OLD"), 0o755)
+
+	u := New(Options{
+		Version:   "1.0.0",
+		BaseURL:   srv.URL,
+		BinaryDir: dir,
+		User:      "alice",
+		runCommand: func(ctx context.Context, name string, args ...string) (string, error) {
+			if name == "systemctl" {
+				return "", nil
+			}
+			return "bytes-dns 1.0.0", nil
+		},
+		osRename: func(oldPath, newPath string) error { return os.Rename(oldPath, newPath) },
+	})
+
+	result, err := u.Update(context.Background(), UpdateOptions{Force: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != ActionUpdated {
+		t.Errorf("Action = %q, want %q", result.Action, ActionUpdated)
+	}
+	if httpCalls != 3 {
+		t.Errorf("expected 3 HTTP calls, got %d", httpCalls)
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(binary) {
+		t.Errorf("installed binary = %q, want %q", got, binary)
+	}
+}
+
+func TestCheck_ReportsUpdateAvailable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tag_name": "v1.0.1", "assets": []}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	u := New(Options{Version: "1.0.0", BaseURL: srv.URL})
+	result, err := u.Check(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Current != "1.0.0" {
+		t.Errorf("Current = %q, want %q", result.Current, "1.0.0")
+	}
+	if result.Latest != "1.0.1" {
+		t.Errorf("Latest = %q, want %q", result.Latest, "1.0.1")
+	}
+	if !result.UpdateAvailable {
+		t.Error("expected UpdateAvailable = true")
+	}
+}
 func TestLatest_ParsesGitHubJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Accept") != "application/vnd.github+json" {
