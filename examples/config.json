@@ -6,7 +6,7 @@
   "record_type": "A",
   "ttl": 60,
   "interval_minutes": 5,
-  "ip_source": "https://api4.my-ip.io/ip.txt",
+  "ip_source": "https://api4.my-ip.io/ip.txt,https://ifconfig.co/ip,https://checkip.amazonaws.com",
   "log_level": "info",
   "allow_private_ip": false,
   "dry_run": false

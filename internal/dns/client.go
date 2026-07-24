@@ -15,6 +15,9 @@ import (
 const (
 	productionAPIBase = "https://api.hetzner.cloud/v1"
 	requestTimeout    = 15 * time.Second
+
+	maxRetries       = 3
+	retryBackoffBase = 250 * time.Millisecond
 )
 
 type Client struct {
@@ -153,8 +156,11 @@ func (c *Client) UpdateRRSet(ctx context.Context, zoneID string, rrset *RRSet, n
 		return nil, fmt.Errorf("updating rrset %s (%s) in zone %s: %w", rrset.Name, rrset.Type, zoneID, err)
 	}
 
-	rrset.Records = body.Records
-	return rrset, nil
+	// Return a copy so we don't mutate the caller's RRSet.
+	updated := *rrset
+	updated.Records = make([]RecordValue, len(body.Records))
+	copy(updated.Records, body.Records)
+	return &updated, nil
 }
 
 func (c *Client) CreateRRSet(ctx context.Context, zoneID, name, recordType, value string, ttl int) (*RRSet, error) {
@@ -189,8 +195,7 @@ func (c *Client) get(ctx context.Context, endpoint string, out any) error {
 		return fmt.Errorf("building request: %w", err)
 	}
 	c.setHeaders(req)
-
-	return c.do(req, out)
+	return c.doWithRetry(req, out)
 }
 
 func (c *Client) put(ctx context.Context, endpoint string, body any, out any) error {
@@ -213,14 +218,77 @@ func (c *Client) sendJSON(ctx context.Context, method, endpoint string, body, ou
 	}
 	c.setHeaders(req)
 	req.Header.Set("Content-Type", "application/json")
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(encoded)), nil
+	}
 
-	return c.do(req, out)
+	return c.doWithRetry(req, out)
 }
 
 func (c *Client) setHeaders(req *http.Request) {
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "bytes-dns/1.0 (+https://github.com/bytes-commerce/bytes-dns)")
+}
+
+// doWithRetry executes the HTTP request with a retry policy.
+// Retries on HTTP 5xx, 429, and network errors. Does not retry on 4xx.
+func (c *Client) doWithRetry(req *http.Request, out any) error {
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := retryBackoffBase * (1 << (attempt - 1)) // 250ms, 500ms, 1s
+			select {
+			case <-time.After(backoff):
+			case <-req.Context().Done():
+				return fmt.Errorf("retry aborted: %w", req.Context().Err())
+			}
+		}
+
+		// Re-create the request body for retries if needed.
+		var bodyReader io.ReadCloser
+		if req.Body != nil {
+			if req.GetBody == nil {
+				// Caller didn't supply GetBody; can't safely retry.
+				return c.do(req, out)
+			}
+			rc, err := req.GetBody()
+			if err != nil {
+				return fmt.Errorf("retry body clone: %w", err)
+			}
+			bodyReader = rc
+		}
+
+		attemptReq := req
+		if bodyReader != nil {
+			clone := req.Clone(req.Context())
+			clone.Body = bodyReader
+			attemptReq = clone
+		}
+
+		lastErr = c.do(attemptReq, out)
+		if lastErr == nil || !shouldRetry(lastErr) {
+			return lastErr
+		}
+	}
+	return fmt.Errorf("after %d attempts: %w", maxRetries, lastErr)
+}
+
+func shouldRetry(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "HTTP 429"):
+		return true
+	case strings.Contains(msg, "HTTP 5"):
+		return true
+	case strings.Contains(msg, "HTTP request to"):
+		return true // network / connection error
+	default:
+		return false
+	}
 }
 
 func (c *Client) do(req *http.Request, out any) error {

@@ -92,14 +92,37 @@ cd bytes-dns
 
 # Build and install binary + systemd units in one step:
 sudo bash install.sh
+# OR, if bytes-dns is already on PATH:
+sudo bytes-dns install
 ```
 
-`install.sh` will:
-1. Build the binary from source (`go build`)
-2. Install it to `/usr/local/bin/bytes-dns`
-3. Install systemd service and timer unit templates
-4. Enable and start the timer for the current user
-5. Launch an interactive setup if no config exists
+Both commands perform the same install: copy the binary to `/usr/local/bin/bytes-dns`, install systemd service and timer unit templates, enable and start the timer for the current user, and prompt for setup if no config exists.
+
+---
+
+## Updating
+
+```bash
+# Check whether an update is available
+sudo bytes-dns update --check
+
+# Apply the latest release
+sudo bytes-dns update
+```
+
+The update command:
+1. Fetches the latest release from [GitHub](https://github.com/bytes-commerce/bytes-dns/releases).
+2. Picks the asset matching your platform (`runtime.GOOS`/`runtime.GOARCH`).
+3. Verifies the asset against the release's `checksums.txt`.
+4. Runs the new binary with `--version` as a sanity check.
+5. Atomically renames the current binary to `bytes-dns.old.<version>` and the new binary into place.
+6. Restarts the systemd timer so the next scheduled run uses the new binary.
+
+If the new binary is broken, you can roll back manually:
+```bash
+sudo mv /usr/local/bin/bytes-dns.old.<old-version> /usr/local/bin/bytes-dns
+sudo systemctl restart bytes-dns@$USER.timer
+```
 
 ---
 
@@ -150,7 +173,7 @@ $EDITOR ~/.bytes-dns/config.json
 | `record_type`      | ❌        | `A`                              | Record type: `A` (IPv4) or `AAAA` (IPv6) |
 | `ttl`              | ❌        | `60`                             | DNS TTL in seconds |
 | `interval_minutes` | ❌        | `5`                              | Timer interval; used by `install.sh` |
-| `ip_source`        | ❌        | `https://api4.my-ip.io/ip.txt`   | URL returning the public IP as plain text |
+| `ip_source`        | ❌        | `https://api4.my-ip.io/ip.txt,https://ifconfig.co/ip,https://checkip.amazonaws.com` | Comma-separated list of URLs (tried in order) returning the public IP as plain text |
 | `log_level`        | ❌        | `info`                           | `debug`, `info`, `warn`, `error` |
 | `allow_private_ip` | ❌        | `false`                          | Set `true` only for NAT/internal setups |
 | `dry_run`          | ❌        | `false`                          | Preview changes without writing to Hetzner |
@@ -192,8 +215,9 @@ bytes-dns run --dry-run    # Preview without writing
 bytes-dns test             # Full connectivity and config test
 bytes-dns setup            # Interactive configuration wizard
 bytes-dns status           # Show current state and systemd timer status
-bytes-dns install          # Print installation instructions
-bytes-dns uninstall        # Print uninstallation instructions
+bytes-dns install          # Install binary, systemd units, and enable timer (requires root)
+bytes-dns uninstall        # Remove systemd units and binary (requires root)
+bytes-dns update           # Fetch latest release from GitHub and replace the binary (requires root)
 bytes-dns version          # Print version, commit, and Go runtime info
 ```
 
@@ -217,7 +241,7 @@ sudo systemctl enable --now "bytes-dns@youruser.timer"
 
 ### Timer behavior
 
-- Fires **2 minutes** after every boot (catches IP changes from restarts)
+- Fires **1 minute** after every boot (catches IP changes from restarts)
 - Fires every **`interval_minutes`** thereafter (default: 5 min)
 - Up to 30-second randomised delay to avoid thundering herd
 - `Persistent=true` — catches up if the system was off when the timer fired
