@@ -18,6 +18,13 @@ const (
 
 	maxRetries       = 3
 	retryBackoffBase = 250 * time.Millisecond
+
+	// actionPollInterval is how often we poll the Hetzner action
+	// status endpoint after firing an rrset action.
+	actionPollInterval = 500 * time.Millisecond
+	// actionWaitTimeout is the maximum time we wait for an action
+	// to reach a terminal state before giving up.
+	actionWaitTimeout = 30 * time.Second
 )
 
 type Client struct {
@@ -141,7 +148,11 @@ func (c *Client) FindRRSet(ctx context.Context, zoneID, name, recordType string)
 }
 
 func (c *Client) UpdateRRSet(ctx context.Context, zoneID string, rrset *RRSet, newValue string) (*RRSet, error) {
-	body := updateRRSetRequest{
+	// Hetzner migrated the rrset update from PUT to an action endpoint
+	// (POST /zones/{id}/rrsets/{name}/{type}/actions/set_records) in
+	// late 2025. The old PUT endpoint returns 422 with
+	// "can't update records with this endpoint".
+	body := setRecordsRequest{
 		Records: []RecordValue{
 			{
 				Value:   newValue,
@@ -150,10 +161,16 @@ func (c *Client) UpdateRRSet(ctx context.Context, zoneID string, rrset *RRSet, n
 		},
 	}
 
-	endpoint := fmt.Sprintf("%s/zones/%s/rrsets/%s/%s", c.apiBase, url.PathEscape(zoneID), url.PathEscape(rrset.Name), url.PathEscape(rrset.Type))
+	endpoint := fmt.Sprintf("%s/zones/%s/rrsets/%s/%s/actions/set_records",
+		c.apiBase, url.PathEscape(zoneID), url.PathEscape(rrset.Name), url.PathEscape(rrset.Type))
 
-	if err := c.put(ctx, endpoint, body, nil); err != nil {
+	var resp actionResponse
+	if err := c.post(ctx, endpoint, body, &resp); err != nil {
 		return nil, fmt.Errorf("updating rrset %s (%s) in zone %s: %w", rrset.Name, rrset.Type, zoneID, err)
+	}
+
+	if err := c.waitForAction(ctx, resp.Action.ID); err != nil {
+		return nil, fmt.Errorf("waiting for set_records action on %s (%s) in zone %s: %w", rrset.Name, rrset.Type, zoneID, err)
 	}
 
 	// Return a copy so we don't mutate the caller's RRSet.
@@ -164,29 +181,91 @@ func (c *Client) UpdateRRSet(ctx context.Context, zoneID string, rrset *RRSet, n
 }
 
 func (c *Client) CreateRRSet(ctx context.Context, zoneID, name, recordType, value string, ttl int) (*RRSet, error) {
-	body := createRRSetRequest{
-		Name: name,
-		Type: recordType,
-		TTL:  ttl,
+	// Hetzner's rrset create flow also uses the action endpoint:
+	// POST /zones/{id}/rrsets/{name}/{type}/actions/set_records. The
+	// set_records action creates the rrset if it doesn't exist.
+	body := setRecordsRequest{
 		Records: []RecordValue{
 			{
 				Value:   value,
 				Comment: "Auto-provisionized by Bytes-DNS.",
 			},
 		},
-		Labels: map[string]string{
-			"bytes-dns": "success",
-		},
+		TTL: &ttl,
 	}
 
-	endpoint := fmt.Sprintf("%s/zones/%s/rrsets", c.apiBase, url.PathEscape(zoneID))
+	endpoint := fmt.Sprintf("%s/zones/%s/rrsets/%s/%s/actions/set_records",
+		c.apiBase, url.PathEscape(zoneID), url.PathEscape(name), url.PathEscape(recordType))
 
-	var result rrsetResponse
-	if err := c.post(ctx, endpoint, body, &result); err != nil {
+	var resp actionResponse
+	if err := c.post(ctx, endpoint, body, &resp); err != nil {
 		return nil, fmt.Errorf("creating %s record %q in zone %s: %w", recordType, name, zoneID, err)
 	}
 
-	return &result.RRSet, nil
+	if err := c.waitForAction(ctx, resp.Action.ID); err != nil {
+		return nil, fmt.Errorf("waiting for set_records action on %s (%s) in zone %s: %w", name, recordType, zoneID, err)
+	}
+
+	return &RRSet{
+		Name:    name,
+		Type:    recordType,
+		TTL:     ttl,
+		Zone:    parseZoneID(zoneID),
+		Records: body.Records,
+	}, nil
+}
+
+// parseZoneID converts a zoneID string to an int. Returns 0 on parse failure.
+func parseZoneID(s string) int {
+	var n int
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
+}
+
+// waitForAction polls the Hetzner /actions/{id} endpoint until the
+// action reaches status "success" or "error", or the timeout expires.
+func (c *Client) waitForAction(ctx context.Context, id int) error {
+	deadline := time.Now().Add(actionWaitTimeout)
+	for {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for action %d after %s", id, actionWaitTimeout)
+		}
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("context cancelled while waiting for action %d: %w", id, err)
+		}
+
+		endpoint := fmt.Sprintf("%s/actions/%d", c.apiBase, id)
+		var resp actionResponse
+		if err := c.get(ctx, endpoint, &resp); err != nil {
+			return fmt.Errorf("polling action %d: %w", id, err)
+		}
+
+		switch resp.Action.Status {
+		case "success":
+			return nil
+		case "error":
+			msg := "unknown error"
+			if resp.Action.Error != nil {
+				msg = resp.Action.Error.Message
+			}
+			return fmt.Errorf("action %d failed: %s", id, msg)
+		case "running":
+			// fall through to sleep + retry
+		default:
+			// Unknown status — treat as running.
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(actionPollInterval):
+		}
+	}
 }
 
 func (c *Client) get(ctx context.Context, endpoint string, out any) error {

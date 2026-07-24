@@ -71,3 +71,30 @@ type CreateZoneRequest struct {
 type createZoneResponse struct {
 	Zone Zone `json:"zone"`
 }
+
+// setRecordsRequest is the body for the rrset "set_records" action,
+// which is Hetzner's current way of replacing or creating the records
+// of an rrset. It supersedes the older PUT /rrsets/{name}/{type} endpoint.
+type setRecordsRequest struct {
+	Records []RecordValue `json:"records"`
+	TTL     *int           `json:"ttl,omitempty"`
+}
+
+// Action represents a Hetzner Cloud API async action.
+type Action struct {
+	ID       int        `json:"id"`
+	Status   string     `json:"status"` // "running", "success", "error"
+	Command  string     `json:"command"`
+	Progress int        `json:"progress"`
+	Started  time.Time  `json:"started"`
+	Finished *time.Time `json:"finished"`
+	Error    *struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
+}
+
+// actionResponse wraps a single Action returned by the Hetzner API.
+type actionResponse struct {
+	Action Action `json:"action"`
+}
