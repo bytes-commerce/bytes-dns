@@ -364,6 +364,10 @@ func (u *Updater) Update(ctx context.Context, opts UpdateOptions) (*Result, erro
 	if err := os.WriteFile(stagedPath, body, 0o644); err != nil {
 		return nil, fmt.Errorf("staging new binary: %w", err)
 	}
+	// Chmod to 0755 so Preflight can execute the staged binary on Linux.
+	if err := os.Chmod(stagedPath, 0o755); err != nil {
+		return nil, fmt.Errorf("chmod staged binary: %w", err)
+	}
 	defer os.Remove(stagedPath)
 
 	if err := u.Preflight(ctx, stagedPath); err != nil {
