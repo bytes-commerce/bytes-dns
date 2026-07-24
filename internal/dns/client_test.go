@@ -392,3 +392,38 @@ func TestClient_GivesUpAfter3Attempts(t *testing.T) {
 		t.Errorf("calls = %d, want 3 (final attempt)", calls)
 	}
 }
+
+func TestUpdateRRSet_DoesNotMutateInput(t *testing.T) {
+	mock := &hetznerMock{}
+	client, _ := newTestClient(t, mock)
+
+	original := &dns.RRSet{
+		ID:   "home/A",
+		Name: "home",
+		Type: "A",
+		TTL:  60,
+		Records: []dns.RecordValue{
+			{Value: "1.2.3.4"},
+		},
+	}
+
+	// Snapshot the original.
+	beforeRecords := make([]dns.RecordValue, len(original.Records))
+	copy(beforeRecords, original.Records)
+
+	_, err := client.UpdateRRSet(context.Background(), "42", original, "9.9.9.9")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(original.Records) != len(beforeRecords) {
+		t.Fatalf("original.Records length changed: was %d, now %d",
+			len(beforeRecords), len(original.Records))
+	}
+	for i := range beforeRecords {
+		if original.Records[i].Value != beforeRecords[i].Value {
+			t.Errorf("original.Records[%d].Value = %q, want %q (input was mutated)",
+				i, original.Records[i].Value, beforeRecords[i].Value)
+		}
+	}
+}

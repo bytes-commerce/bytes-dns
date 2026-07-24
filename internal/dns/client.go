@@ -156,8 +156,11 @@ func (c *Client) UpdateRRSet(ctx context.Context, zoneID string, rrset *RRSet, n
 		return nil, fmt.Errorf("updating rrset %s (%s) in zone %s: %w", rrset.Name, rrset.Type, zoneID, err)
 	}
 
-	rrset.Records = body.Records
-	return rrset, nil
+	// Return a copy so we don't mutate the caller's RRSet.
+	updated := *rrset
+	updated.Records = make([]RecordValue, len(body.Records))
+	copy(updated.Records, body.Records)
+	return &updated, nil
 }
 
 func (c *Client) CreateRRSet(ctx context.Context, zoneID, name, recordType, value string, ttl int) (*RRSet, error) {
