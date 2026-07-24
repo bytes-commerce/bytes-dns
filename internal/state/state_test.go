@@ -3,6 +3,7 @@ package state_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,7 +39,6 @@ func TestSaveAndLoad_RoundTrip(t *testing.T) {
 		LastRecordID: "rec-abc123",
 		LastUpdated:  now,
 		LastChecked:  now,
-		LastSyncedIP: "1.2.3.4",
 	}
 
 	if err := sm.Save(original); err != nil {
@@ -102,7 +102,7 @@ func TestMarkChecked(t *testing.T) {
 	}
 }
 
-func TestLoad_CorruptStateReturnsEmpty(t *testing.T) {
+func TestLoad_QuarantinesCorruptState(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
 	if err := os.WriteFile(path, []byte("{corrupt json"), 0o600); err != nil {
@@ -115,7 +115,27 @@ func TestLoad_CorruptStateReturnsEmpty(t *testing.T) {
 		t.Fatalf("expected graceful recovery from corrupt state, got: %v", err)
 	}
 	if st.LastIP != "" {
-		t.Errorf("expected empty state after corrupt file, got LastIP=%q", st.LastIP)
+		t.Errorf("expected empty LastIP after corrupt file, got %q", st.LastIP)
+	}
+
+	// Original file should be renamed.
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("original state file should be renamed, but still exists: %v", err)
+	}
+
+	// A .broken.<timestamp> file should exist.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "state.json.broken.") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected state.json.broken.* file, got: %v", entries)
 	}
 }
 

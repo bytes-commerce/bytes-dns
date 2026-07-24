@@ -14,7 +14,6 @@ type State struct {
 	LastRecordID string    `json:"last_record_id"`
 	LastUpdated  time.Time `json:"last_updated"`
 	LastChecked  time.Time `json:"last_checked"`
-	LastSyncedIP string    `json:"last_synced_ip"`
 }
 
 type Manager struct {
@@ -29,6 +28,9 @@ func DefaultStatePath(configDir string) string {
 	return filepath.Join(configDir, "state.json")
 }
 
+// Load reads the state file. If the file is missing, returns an empty state.
+// If the file is corrupt, renames it to state.json.broken.<unix-timestamp>
+// and returns an empty state.
 func (m *Manager) Load() (*State, error) {
 	data, err := os.ReadFile(m.path)
 	if err != nil {
@@ -40,6 +42,13 @@ func (m *Manager) Load() (*State, error) {
 
 	var s State
 	if err := json.Unmarshal(data, &s); err != nil {
+		// Quarantine the corrupt file so we can debug it later.
+		brokenPath := fmt.Sprintf("%s.broken.%d", m.path, time.Now().Unix())
+		if renameErr := os.Rename(m.path, brokenPath); renameErr != nil {
+			// If rename fails, fall back to empty state but log nothing here
+			// (the logger package would create a circular dep).
+			return &State{}, nil
+		}
 		return &State{}, nil
 	}
 	return &s, nil
@@ -75,7 +84,6 @@ func (m *Manager) MarkChecked(s *State) error {
 
 func (m *Manager) MarkUpdated(s *State, ip, recordID string) error {
 	s.LastIP = ip
-	s.LastSyncedIP = ip
 	s.LastRecordID = recordID
 	s.LastUpdated = time.Now().UTC()
 	s.LastChecked = s.LastUpdated
