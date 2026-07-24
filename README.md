@@ -100,6 +100,32 @@ Both commands perform the same install: copy the binary to `/usr/local/bin/bytes
 
 ---
 
+## Updating
+
+```bash
+# Check whether an update is available
+sudo bytes-dns update --check
+
+# Apply the latest release
+sudo bytes-dns update
+```
+
+The update command:
+1. Fetches the latest release from [GitHub](https://github.com/bytes-commerce/bytes-dns/releases).
+2. Picks the asset matching your platform (`runtime.GOOS`/`runtime.GOARCH`).
+3. Verifies the asset against the release's `checksums.txt`.
+4. Runs the new binary with `--version` as a sanity check.
+5. Atomically renames the current binary to `bytes-dns.old.<version>` and the new binary into place.
+6. Restarts the systemd timer so the next scheduled run uses the new binary.
+
+If the new binary is broken, you can roll back manually:
+```bash
+sudo mv /usr/local/bin/bytes-dns.old.<old-version> /usr/local/bin/bytes-dns
+sudo systemctl restart bytes-dns@$USER.timer
+```
+
+---
+
 ## Configuration
 
 Config lives at `~/.bytes-dns/config.json`. Permissions **must** be `600`.
@@ -191,6 +217,7 @@ bytes-dns setup            # Interactive configuration wizard
 bytes-dns status           # Show current state and systemd timer status
 bytes-dns install          # Install binary, systemd units, and enable timer (requires root)
 bytes-dns uninstall        # Remove systemd units and binary (requires root)
+bytes-dns update           # Fetch latest release from GitHub and replace the binary (requires root)
 bytes-dns version          # Print version, commit, and Go runtime info
 ```
 
