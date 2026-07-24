@@ -144,9 +144,8 @@ func (i *Installer) writeUnitFiles() error {
 		return fmt.Errorf("write service unit: %w", err)
 	}
 
-	// Write the timer template with INTERVAL_PLACEHOLDER preserved; the
-	// interval is rendered at use-time by renderTimer below.
-	if err := os.WriteFile(filepath.Join(i.SystemdDir, "bytes-dns@.timer"), []byte(timerTemplate), 0o644); err != nil {
+	timer := renderTimer([]byte(timerTemplate), i.IntervalMins)
+	if err := os.WriteFile(filepath.Join(i.SystemdDir, "bytes-dns@.timer"), []byte(timer), 0o644); err != nil {
 		return fmt.Errorf("write timer unit: %w", err)
 	}
 	return nil

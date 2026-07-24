@@ -45,14 +45,13 @@ func TestInstaller_InstallWritesUnitsAndRecordsSystemctlCalls(t *testing.T) {
 		// %i is at template level — actual file is the template, not the instance.
 	}
 	timerBytes, _ := readFile(timerPath)
-	if !strings.Contains(string(timerBytes), "INTERVAL_PLACEHOLDER") {
-		t.Errorf("timer template should keep INTERVAL_PLACEHOLDER until rendered")
-	}
+	timerStr := string(timerBytes)
 
-	// Verify rendered timer would have the right interval.
-	rendered := renderTimer(timerBytes, 5)
-	if !strings.Contains(rendered, "OnUnitActiveSec=5min") {
-		t.Errorf("rendered timer missing 5min interval: %s", rendered)
+	if strings.Contains(timerStr, "INTERVAL_PLACEHOLDER") {
+		t.Errorf("timer file should not contain literal INTERVAL_PLACEHOLDER; got: %s", timerStr)
+	}
+	if !strings.Contains(timerStr, "OnUnitActiveSec=5min") {
+		t.Errorf("timer file should contain rendered OnUnitActiveSec=5min; got: %s", timerStr)
 	}
 
 	// Verify systemctl was called in the right order.
