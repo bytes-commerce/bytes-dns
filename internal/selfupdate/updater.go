@@ -53,7 +53,7 @@ type Updater struct {
 
 	// Hooks for testing. Defaults call the real OS / network.
 	RootCheck  func() error
-	httpGet    func(ctx context.Context, url, accept, userAgent string) ([]byte, error)
+	httpGet    func(ctx context.Context, url, accept, userAgent string, maxBytes int) ([]byte, error)
 	runCommand func(ctx context.Context, name string, args ...string) (string, error)
 	osRename   func(oldPath, newPath string) error
 }
@@ -69,7 +69,7 @@ type Options struct {
 
 	// httpGet overrides the HTTP GET hook (for tests). When nil,
 	// defaultHTTPGet is used.
-	httpGet func(ctx context.Context, url, accept, userAgent string) ([]byte, error)
+	httpGet func(ctx context.Context, url, accept, userAgent string, maxBytes int) ([]byte, error)
 }
 
 // New returns an Updater configured for the bytes-commerce/bytes-dns repo.
@@ -102,7 +102,7 @@ func (u *Updater) Latest(ctx context.Context) (*Release, error) {
 	accept := acceptHeader
 	ua := fmt.Sprintf(userAgentFmt, u.Version)
 
-	body, err := u.httpGet(ctx, endpoint, accept, ua)
+	body, err := u.httpGet(ctx, endpoint, accept, ua, 1<<20)
 	if err != nil {
 		return nil, fmt.Errorf("fetching latest release: %w", err)
 	}
@@ -159,7 +159,7 @@ func defaultRootCheck() error {
 	return nil
 }
 
-func defaultHTTPGet(ctx context.Context, url, accept, userAgent string) ([]byte, error) {
+func defaultHTTPGet(ctx context.Context, url, accept, userAgent string, maxBytes int) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("building request: %w", err)
@@ -184,7 +184,10 @@ func defaultHTTPGet(ctx context.Context, url, accept, userAgent string) ([]byte,
 		return nil, fmt.Errorf("unexpected HTTP %d from GitHub", resp.StatusCode)
 	}
 
-	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if maxBytes <= 0 {
+		maxBytes = 1 << 20
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, int64(maxBytes)))
 }
 
 func defaultRunCommand(ctx context.Context, name string, args ...string) (string, error) {
@@ -200,7 +203,7 @@ func defaultOsRename(oldPath, newPath string) error {
 // Download fetches the asset's bytes.
 func (u *Updater) Download(ctx context.Context, asset Asset) ([]byte, error) {
 	ua := fmt.Sprintf(userAgentFmt, u.Version)
-	body, err := u.httpGet(ctx, asset.URL, "application/octet-stream", ua)
+	body, err := u.httpGet(ctx, asset.URL, "application/octet-stream", ua, 100<<20)
 	if err != nil {
 		return nil, fmt.Errorf("downloading %s: %w", asset.Name, err)
 	}
@@ -211,7 +214,12 @@ func (u *Updater) Download(ctx context.Context, asset Asset) ([]byte, error) {
 func (u *Updater) FetchChecksums(ctx context.Context, rel *Release) ([]byte, error) {
 	for _, a := range rel.Assets {
 		if a.Name == "checksums.txt" {
-			return u.Download(ctx, a)
+			ua := fmt.Sprintf(userAgentFmt, u.Version)
+			body, err := u.httpGet(ctx, a.URL, "application/octet-stream", ua, 1<<20)
+			if err != nil {
+				return nil, fmt.Errorf("downloading %s: %w", a.Name, err)
+			}
+			return body, nil
 		}
 	}
 	return nil, fmt.Errorf("checksums.txt not found in release %s", rel.Tag)
