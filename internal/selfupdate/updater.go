@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -75,6 +76,9 @@ type Options struct {
 	// runCommand overrides command execution (for tests). When nil,
 	// defaultRunCommand is used.
 	runCommand func(ctx context.Context, name string, args ...string) (string, error)
+
+	// osRename overrides file renaming (for tests). When nil, defaultOsRename is used.
+	osRename func(oldPath, newPath string) error
 }
 
 // New returns an Updater configured for the bytes-commerce/bytes-dns repo.
@@ -87,6 +91,10 @@ func New(opts Options) *Updater {
 	if runCommand == nil {
 		runCommand = defaultRunCommand
 	}
+	osRename := opts.osRename
+	if osRename == nil {
+		osRename = defaultOsRename
+	}
 	return &Updater{
 		Owner:      opts.RepoOwner,
 		Repo:       opts.RepoName,
@@ -97,7 +105,7 @@ func New(opts Options) *Updater {
 		RootCheck:  defaultRootCheck,
 		httpGet:    httpGet,
 		runCommand: runCommand,
-		osRename:   defaultOsRename,
+		osRename:   osRename,
 	}
 }
 
@@ -231,9 +239,46 @@ func defaultRunCommand(ctx context.Context, name string, args ...string) (string
 	return strings.TrimSpace(string(out)), err
 }
 
-func defaultOsRename(oldPath, newPath string) error {
-	// Implemented in Task 5 (used by Apply).
+// Apply atomically replaces the running binary with the staged one and
+// restarts the systemd timer so the next run uses the new binary.
+//
+// The old binary is preserved at <dest>.old.<oldVer> for manual rollback.
+func (u *Updater) Apply(ctx context.Context, stagedPath, oldVer string) error {
+	dest := filepath.Join(u.BinaryDir, "bytes-dns")
+	backup := filepath.Join(u.BinaryDir, fmt.Sprintf("bytes-dns.old.%s", oldVer))
+
+	// If the staged path is the same as dest, nothing to do.
+	if stagedPath == dest {
+		return nil
+	}
+
+	// Remove any stale backup from a prior update.
+	if _, err := os.Stat(backup); err == nil {
+		_ = os.Remove(backup)
+	}
+
+	if err := u.osRename(dest, backup); err != nil {
+		return fmt.Errorf("backing up old binary: %w", err)
+	}
+	if err := u.osRename(stagedPath, dest); err != nil {
+		// Try to restore the old binary.
+		_ = u.osRename(backup, dest)
+		return fmt.Errorf("moving new binary into place: %w", err)
+	}
+	if err := os.Chmod(dest, 0o755); err != nil {
+		return fmt.Errorf("chmod new binary: %w", err)
+	}
+
+	// Restart the systemd timer.
+	timerUnit := fmt.Sprintf("bytes-dns@%s.timer", u.User)
+	if _, err := u.runCommand(ctx, "systemctl", "restart", timerUnit); err != nil {
+		return fmt.Errorf("restarting %s: %w", timerUnit, err)
+	}
 	return nil
+}
+
+func defaultOsRename(oldPath, newPath string) error {
+	return os.Rename(oldPath, newPath)
 }
 
 // Download fetches the asset's bytes.

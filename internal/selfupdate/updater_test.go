@@ -187,3 +187,84 @@ func TestPreflight_CommandFails(t *testing.T) {
 		t.Fatal("expected error when --version fails, got nil")
 	}
 }
+
+func TestApply_AtomicRename(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "bytes-dns")
+	staged := filepath.Join(dir, "bytes-dns.new")
+
+	if err := os.WriteFile(dest, []byte("OLD-BINARY"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(staged, []byte("NEW-BINARY"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var renamed []struct{ old, newPath string }
+	u := New(Options{
+		BinaryDir: dir,
+		User:      "alice",
+		runCommand: func(ctx context.Context, name string, args ...string) (string, error) {
+			return "", nil
+		},
+		osRename: func(oldPath, newPath string) error {
+			renamed = append(renamed, struct{ old, newPath string }{oldPath, newPath})
+			// Perform the actual rename for the test to be observable.
+			return os.Rename(oldPath, newPath)
+		},
+	})
+
+	if err := u.Apply(context.Background(), staged, "1.2.3"); err != nil {
+		t.Fatalf("Apply failed: %v", err)
+	}
+
+	// dest should now contain the new binary.
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "NEW-BINARY" {
+		t.Errorf("dest = %q, want %q (new binary)", string(got), "NEW-BINARY")
+	}
+	// The old binary should be preserved as dest.old.1.2.3.
+	oldPath := filepath.Join(dir, "bytes-dns.old.1.2.3")
+	got, err = os.ReadFile(oldPath)
+	if err != nil {
+		t.Errorf("old backup not created: %v", err)
+	}
+	if string(got) != "OLD-BINARY" {
+		t.Errorf("old backup = %q, want %q", string(got), "OLD-BINARY")
+	}
+}
+
+func TestApply_RestartsTimer(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "bytes-dns")
+	staged := filepath.Join(dir, "bytes-dns.new")
+	_ = os.WriteFile(dest, []byte("OLD"), 0o755)
+	_ = os.WriteFile(staged, []byte("NEW"), 0o755)
+
+	var cmdName string
+	var cmdArgs []string
+	u := New(Options{
+		BinaryDir: dir,
+		User:      "alice",
+		runCommand: func(ctx context.Context, name string, args ...string) (string, error) {
+			cmdName = name
+			cmdArgs = args
+			return "", nil
+		},
+		osRename: os.Rename,
+	})
+
+	if err := u.Apply(context.Background(), staged, "1.0.0"); err != nil {
+		t.Fatalf("Apply failed: %v", err)
+	}
+	if cmdName != "systemctl" {
+		t.Errorf("expected systemctl invocation, got %q", cmdName)
+	}
+	wantTimer := "bytes-dns@alice.timer"
+	if len(cmdArgs) < 2 || cmdArgs[0] != "restart" || cmdArgs[1] != wantTimer {
+		t.Errorf("expected args [restart %s], got %v", wantTimer, cmdArgs)
+	}
+}
