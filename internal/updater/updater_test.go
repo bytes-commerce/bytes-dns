@@ -40,15 +40,24 @@ func hetznerAPIHandler(existingRRSet *dns.RRSet) http.Handler {
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"rrsets": rrsets, "meta": map[string]any{"pagination": map[string]any{}}})
 
-		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/rrsets/"):
-			w.WriteHeader(http.StatusOK)
-
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/rrsets"):
-			var body map[string]any
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			body["id"] = "created-rrset-001"
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/actions/set_records"):
 			w.WriteHeader(http.StatusCreated)
-			_ = json.NewEncoder(w).Encode(map[string]any{"rrset": body})
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"action": map[string]any{
+					"id":      1,
+					"status":  "success",
+					"command": "set_rrset_records",
+				},
+			})
+
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/actions/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"action": map[string]any{
+					"id":      1,
+					"status":  "success",
+					"command": "set_rrset_records",
+				},
+			})
 
 		default:
 			http.Error(w, "not found", http.StatusNotFound)
@@ -255,12 +264,25 @@ func TestRun_ZoneResolutionValidatesAgainstConfigZone(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"rrsets": []map[string]any{}, "meta": map[string]any{}})
 			return
 		}
-		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/rrsets") {
-			var body map[string]any
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			body["id"] = "created"
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/actions/set_records") {
 			w.WriteHeader(http.StatusCreated)
-			_ = json.NewEncoder(w).Encode(map[string]any{"rrset": body})
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"action": map[string]any{
+					"id":      1,
+					"status":  "success",
+					"command": "set_rrset_records",
+				},
+			})
+			return
+		}
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/actions/") {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"action": map[string]any{
+					"id":      1,
+					"status":  "success",
+					"command": "set_rrset_records",
+				},
+			})
 			return
 		}
 		http.Error(w, "not found", http.StatusNotFound)

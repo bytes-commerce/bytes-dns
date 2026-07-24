@@ -14,6 +14,12 @@ import (
 type hetznerMock struct {
 	zones  []map[string]any
 	rrsets []map[string]any
+
+	// actionStatus controls the status returned by /v1/actions/{id}.
+	// If empty, defaults to "success".
+	actionStatus string
+	// actionCalls counts how many times the action endpoint was polled.
+	actionCalls int
 }
 
 func (m *hetznerMock) handler() http.Handler {
@@ -68,20 +74,6 @@ func (m *hetznerMock) handler() http.Handler {
 
 		path := r.URL.Path
 		if strings.HasSuffix(path, "/rrsets") {
-			// POST /v1/zones/{id}/rrsets
-			if r.Method == http.MethodPost {
-				var body map[string]any
-				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-					http.Error(w, "bad request", http.StatusBadRequest)
-					return
-				}
-				body["id"] = body["name"].(string) + "/" + body["type"].(string)
-				resp := map[string]any{"rrset": body}
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusCreated)
-				_ = json.NewEncoder(w).Encode(resp)
-				return
-			}
 			// GET /v1/zones/{id}/rrsets
 			var matched []map[string]any
 			matched = append(matched, m.rrsets...)
@@ -91,13 +83,56 @@ func (m *hetznerMock) handler() http.Handler {
 			return
 		}
 
-		// PUT /v1/zones/{id}/rrsets/{name}/{type}
-		if r.Method == http.MethodPut && strings.Contains(path, "/rrsets/") {
-			w.WriteHeader(http.StatusOK)
+		// POST /v1/zones/{id}/rrsets/{name}/{type}/actions/set_records
+		// Hetzner migrated rrset updates to action-based POSTs in late 2025.
+		if r.Method == http.MethodPost && strings.Contains(path, "/actions/set_records") {
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			actionID := m.actionCalls + 100
+			m.actionCalls++
+			resp := map[string]any{
+				"action": map[string]any{
+					"id":       actionID,
+					"status":   "running",
+					"command":  "set_rrset_records",
+					"progress": 0,
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(resp)
 			return
 		}
 
 		http.Error(w, "not found", http.StatusNotFound)
+	})
+
+	mux.HandleFunc("/v1/actions/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			http.Error(w, `{"message":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+
+		status := m.actionStatus
+		if status == "" {
+			status = "success"
+		}
+		action := map[string]any{
+			"id":      1,
+			"status":  status,
+			"command": "set_rrset_records",
+		}
+		if status == "error" {
+			action["error"] = map[string]any{
+				"code":    "action_failed",
+				"message": "synthetic test error",
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"action": action})
 	})
 
 	return mux
@@ -204,6 +239,9 @@ func TestUpdateRRSet(t *testing.T) {
 	if updated.Records[0].Value != "9.9.9.9" {
 		t.Errorf("updated value = %q, want %q", updated.Records[0].Value, "9.9.9.9")
 	}
+	if updated.Name != "home" || updated.Type != "A" {
+		t.Errorf("updated name/type = %q/%q, want home/A", updated.Name, updated.Type)
+	}
 }
 
 func TestCreateRRSet(t *testing.T) {
@@ -214,11 +252,43 @@ func TestCreateRRSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if created.ID != "newhost/A" {
-		t.Errorf("created RRSet ID = %q, want %q", created.ID, "newhost/A")
+	if created.Name != "newhost" {
+		t.Errorf("created Name = %q, want %q", created.Name, "newhost")
 	}
-	if created.Records[0].Value != "10.0.0.1" {
-		t.Errorf("created record value = %q, want %q", created.Records[0].Value, "10.0.0.1")
+	if created.Type != "A" {
+		t.Errorf("created Type = %q, want %q", created.Type, "A")
+	}
+	if created.TTL != 60 {
+		t.Errorf("created TTL = %d, want 60", created.TTL)
+	}
+	if created.Zone != 42 {
+		t.Errorf("created Zone = %d, want 42", created.Zone)
+	}
+	if len(created.Records) != 1 || created.Records[0].Value != "10.0.0.1" {
+		t.Errorf("created Records = %+v, want [{10.0.0.1}]", created.Records)
+	}
+}
+
+func TestUpdateRRSet_ActionError(t *testing.T) {
+	mock := &hetznerMock{actionStatus: "error"}
+	client, _ := newTestClient(t, mock)
+
+	existing := &dns.RRSet{
+		ID:   "home/A",
+		Name: "home",
+		Type: "A",
+		TTL:  60,
+		Records: []dns.RecordValue{
+			{Value: "1.2.3.4"},
+		},
+	}
+
+	_, err := client.UpdateRRSet(context.Background(), "42", existing, "9.9.9.9")
+	if err == nil {
+		t.Fatal("expected error from action polling, got nil")
+	}
+	if !strings.Contains(err.Error(), "synthetic test error") {
+		t.Errorf("expected action error to bubble up, got: %v", err)
 	}
 }
 
