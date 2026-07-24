@@ -47,22 +47,6 @@ type rrsetsResponse struct {
 	Meta   Meta    `json:"meta"`
 }
 
-type rrsetResponse struct {
-	RRSet RRSet `json:"rrset"`
-}
-
-type createRRSetRequest struct {
-	Name    string            `json:"name"`
-	Type    string            `json:"type"`
-	TTL     int               `json:"ttl"`
-	Records []RecordValue     `json:"records"`
-	Labels  map[string]string `json:"labels,omitempty"`
-}
-
-type updateRRSetRequest struct {
-	Records []RecordValue `json:"records"`
-}
-
 type CreateZoneRequest struct {
 	Name string `json:"name"`
 	TTL  int    `json:"ttl,omitempty"`

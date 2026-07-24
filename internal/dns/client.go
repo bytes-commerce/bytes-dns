@@ -277,10 +277,6 @@ func (c *Client) get(ctx context.Context, endpoint string, out any) error {
 	return c.doWithRetry(req, out)
 }
 
-func (c *Client) put(ctx context.Context, endpoint string, body any, out any) error {
-	return c.sendJSON(ctx, http.MethodPut, endpoint, body, out)
-}
-
 func (c *Client) post(ctx context.Context, endpoint string, body any, out any) error {
 	return c.sendJSON(ctx, http.MethodPost, endpoint, body, out)
 }
