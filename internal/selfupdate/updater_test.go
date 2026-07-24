@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestUpdate_SkipsWhenSameVersion(t *testing.T) {
@@ -23,7 +24,7 @@ func TestUpdate_SkipsWhenSameVersion(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	u := New(Options{
-		Version: "1.0.0",
+		Version: "v1.0.0",
 		BaseURL: srv.URL,
 	})
 	result, err := u.Update(context.Background(), UpdateOptions{})
@@ -76,7 +77,7 @@ func TestUpdate_ForceReinstalls(t *testing.T) {
 	_ = os.WriteFile(dest, []byte("OLD"), 0o755)
 
 	u := New(Options{
-		Version:   "1.0.0",
+		Version:   "v1.0.0",
 		BaseURL:   srv.URL,
 		BinaryDir: dir,
 		User:      "alice",
@@ -115,7 +116,7 @@ func TestCheck_ReportsUpdateAvailable(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	u := New(Options{Version: "1.0.0", BaseURL: srv.URL})
+	u := New(Options{Version: "v1.0.0", BaseURL: srv.URL})
 	result, err := u.Check(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -141,7 +142,7 @@ func TestLatest_ParsesGitHubJSON(t *testing.T) {
 		_, _ = w.Write([]byte(`{"tag_name":"v1.2.3","assets":[{"name":"bytes-dns-linux-amd64","browser_download_url":"https://example.com/linux-amd64"},{"name":"bytes-dns-linux-arm64","browser_download_url":"https://example.com/linux-arm64"},{"name":"bytes-dns-linux-armv7","browser_download_url":"https://example.com/linux-armv7"},{"name":"checksums.txt","browser_download_url":"https://example.com/checksums.txt"}]}`))
 	}))
 	t.Cleanup(srv.Close)
-	u := New(Options{RepoOwner: "bytes-commerce", RepoName: "bytes-dns", Version: "1.0.0", BaseURL: srv.URL, httpGet: defaultHTTPGet})
+	u := New(Options{RepoOwner: "bytes-commerce", RepoName: "bytes-dns", Version: "v1.0.0", BaseURL: srv.URL, httpGet: defaultHTTPGet})
 	rel, err := u.Latest(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -175,6 +176,61 @@ func TestLatest_TrimsVPrefix(t *testing.T) {
 	}
 }
 
+func TestLatest_UsesMetadataTimeout(t *testing.T) {
+	var gotTimeout time.Duration
+	u := New(Options{
+		Version: "v1.0.0",
+		httpGet: func(_ context.Context, _, _, _ string, _ int, timeout time.Duration) ([]byte, error) {
+			gotTimeout = timeout
+			return []byte(`{"tag_name":"v1.0.0","assets":[]}`), nil
+		},
+	})
+
+	if _, err := u.Latest(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if gotTimeout != 10*time.Second {
+		t.Errorf("timeout = %s, want %s", gotTimeout, 10*time.Second)
+	}
+}
+
+func TestDownload_UsesBinaryTimeout(t *testing.T) {
+	var gotTimeout time.Duration
+	u := New(Options{
+		Version: "v1.0.0",
+		httpGet: func(_ context.Context, _, _, _ string, _ int, timeout time.Duration) ([]byte, error) {
+			gotTimeout = timeout
+			return []byte("binary"), nil
+		},
+	})
+
+	if _, err := u.Download(context.Background(), Asset{Name: "binary", URL: "https://example.com/binary"}); err != nil {
+		t.Fatal(err)
+	}
+	if gotTimeout != 5*time.Minute {
+		t.Errorf("timeout = %s, want %s", gotTimeout, 5*time.Minute)
+	}
+}
+
+func TestFetchChecksums_UsesMetadataTimeout(t *testing.T) {
+	var gotTimeout time.Duration
+	u := New(Options{
+		Version: "v1.0.0",
+		httpGet: func(_ context.Context, _, _, _ string, _ int, timeout time.Duration) ([]byte, error) {
+			gotTimeout = timeout
+			return []byte("checksums"), nil
+		},
+	})
+	rel := &Release{Tag: "1.0.0", Assets: []Asset{{Name: "checksums.txt", URL: "https://example.com/checksums.txt"}}}
+
+	if _, err := u.FetchChecksums(context.Background(), rel); err != nil {
+		t.Fatal(err)
+	}
+	if gotTimeout != 10*time.Second {
+		t.Errorf("timeout = %s, want %s", gotTimeout, 10*time.Second)
+	}
+}
+
 func TestAssetForPlatform(t *testing.T) {
 	for _, tt := range []struct{ goos, goarch, goarm, want string }{{"linux", "amd64", "", "bytes-dns-linux-amd64"}, {"linux", "arm64", "", "bytes-dns-linux-arm64"}, {"linux", "arm", "7", "bytes-dns-linux-armv7"}} {
 		t.Run(tt.want, func(t *testing.T) {
@@ -196,7 +252,7 @@ func TestAssetForPlatform_Unsupported(t *testing.T) {
 func TestDownload_FetchesAsset(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("BINARY-CONTENTS")) }))
 	t.Cleanup(srv.Close)
-	u := New(Options{Version: "1.0.0", httpGet: defaultHTTPGet})
+	u := New(Options{Version: "v1.0.0", httpGet: defaultHTTPGet})
 	got, err := u.Download(context.Background(), Asset{Name: "binary", URL: srv.URL})
 	if err != nil {
 		t.Fatal(err)
@@ -210,7 +266,7 @@ func TestDownload_AcceptsLargeBody(t *testing.T) {
 	const bodySize = 6 << 20
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(make([]byte, bodySize)) }))
 	t.Cleanup(srv.Close)
-	u := New(Options{Version: "1.0.0", httpGet: defaultHTTPGet})
+	u := New(Options{Version: "v1.0.0", httpGet: defaultHTTPGet})
 	got, err := u.Download(context.Background(), Asset{Name: "binary", URL: srv.URL})
 	if err != nil {
 		t.Fatal(err)
@@ -247,7 +303,7 @@ func TestPreflight_Success(t *testing.T) {
 	}
 
 	u := New(Options{
-		Version: "1.0.0",
+		Version: "v1.0.0",
 		runCommand: func(ctx context.Context, name string, args ...string) (string, error) {
 			if name != binPath {
 				t.Errorf("runCommand name = %q, want %q", name, binPath)
@@ -272,7 +328,7 @@ func TestPreflight_VersionMismatch(t *testing.T) {
 	}
 
 	u := New(Options{
-		Version: "1.0.0",
+		Version: "v1.0.0",
 		runCommand: func(ctx context.Context, name string, args ...string) (string, error) {
 			return "bytes-dns development\n", nil
 		},
@@ -295,7 +351,7 @@ func TestPreflight_CommandFails(t *testing.T) {
 	}
 
 	u := New(Options{
-		Version: "1.0.0",
+		Version: "v1.0.0",
 		runCommand: func(ctx context.Context, name string, args ...string) (string, error) {
 			return "", fmt.Errorf("exit status 1")
 		},

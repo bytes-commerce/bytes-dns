@@ -23,8 +23,9 @@ import (
 )
 
 const (
-	githubAPIBase  = "https://api.github.com"
-	requestTimeout = 10 * time.Second
+	githubAPIBase         = "https://api.github.com"
+	requestTimeout        = 10 * time.Second
+	binaryDownloadTimeout = 5 * time.Minute
 
 	acceptHeader = "application/vnd.github+json"
 	userAgentFmt = "bytes-dns/%s"
@@ -56,7 +57,7 @@ type Updater struct {
 
 	// Hooks for testing. Defaults call the real OS / network.
 	RootCheck  func() error
-	httpGet    func(ctx context.Context, url, accept, userAgent string, maxBytes int) ([]byte, error)
+	httpGet    func(ctx context.Context, url, accept, userAgent string, maxBytes int, timeout time.Duration) ([]byte, error)
 	runCommand func(ctx context.Context, name string, args ...string) (string, error)
 	osRename   func(oldPath, newPath string) error
 }
@@ -72,7 +73,7 @@ type Options struct {
 
 	// httpGet overrides the HTTP GET hook (for tests). When nil,
 	// defaultHTTPGet is used.
-	httpGet func(ctx context.Context, url, accept, userAgent string, maxBytes int) ([]byte, error)
+	httpGet func(ctx context.Context, url, accept, userAgent string, maxBytes int, timeout time.Duration) ([]byte, error)
 
 	// runCommand overrides command execution (for tests). When nil,
 	// defaultRunCommand is used.
@@ -99,7 +100,7 @@ func New(opts Options) *Updater {
 	return &Updater{
 		Owner:      opts.RepoOwner,
 		Repo:       opts.RepoName,
-		Version:    opts.Version,
+		Version:    strings.TrimPrefix(opts.Version, "v"),
 		BaseURL:    opts.BaseURL,
 		BinaryDir:  opts.BinaryDir,
 		User:       opts.User,
@@ -120,7 +121,7 @@ func (u *Updater) Latest(ctx context.Context) (*Release, error) {
 	accept := acceptHeader
 	ua := fmt.Sprintf(userAgentFmt, u.Version)
 
-	body, err := u.httpGet(ctx, endpoint, accept, ua, 1<<20)
+	body, err := u.httpGet(ctx, endpoint, accept, ua, 1<<20, requestTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("fetching latest release: %w", err)
 	}
@@ -177,7 +178,7 @@ func defaultRootCheck() error {
 	return nil
 }
 
-func defaultHTTPGet(ctx context.Context, url, accept, userAgent string, maxBytes int) ([]byte, error) {
+func defaultHTTPGet(ctx context.Context, url, accept, userAgent string, maxBytes int, timeout time.Duration) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("building request: %w", err)
@@ -185,7 +186,10 @@ func defaultHTTPGet(ctx context.Context, url, accept, userAgent string, maxBytes
 	req.Header.Set("Accept", accept)
 	req.Header.Set("User-Agent", userAgent)
 
-	client := &http.Client{Timeout: requestTimeout}
+	if timeout <= 0 {
+		timeout = requestTimeout
+	}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
@@ -376,7 +380,7 @@ func (u *Updater) Update(ctx context.Context, opts UpdateOptions) (*Result, erro
 // Download fetches the asset's bytes.
 func (u *Updater) Download(ctx context.Context, asset Asset) ([]byte, error) {
 	ua := fmt.Sprintf(userAgentFmt, u.Version)
-	body, err := u.httpGet(ctx, asset.URL, "application/octet-stream", ua, 100<<20)
+	body, err := u.httpGet(ctx, asset.URL, "application/octet-stream", ua, 100<<20, binaryDownloadTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("downloading %s: %w", asset.Name, err)
 	}
@@ -388,7 +392,7 @@ func (u *Updater) FetchChecksums(ctx context.Context, rel *Release) ([]byte, err
 	for _, a := range rel.Assets {
 		if a.Name == "checksums.txt" {
 			ua := fmt.Sprintf(userAgentFmt, u.Version)
-			body, err := u.httpGet(ctx, a.URL, "application/octet-stream", ua, 1<<20)
+			body, err := u.httpGet(ctx, a.URL, "application/octet-stream", ua, 1<<20, requestTimeout)
 			if err != nil {
 				return nil, fmt.Errorf("downloading %s: %w", a.Name, err)
 			}
