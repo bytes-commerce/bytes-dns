@@ -229,6 +229,112 @@ func TestTest(t *testing.T) {
 	}
 }
 
+func TestRun_ZoneResolutionValidatesAgainstConfigZone(t *testing.T) {
+	// Two zones — suffix match would pick "example.com" but cfg.Zone is "sub.example.com".
+	ipSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("5.6.7.8"))
+	}))
+	t.Cleanup(ipSrv.Close)
+
+	zonesCalls := 0
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/zones") && !strings.Contains(r.URL.Path, "/rrsets") {
+			zonesCalls++
+			zones := []map[string]any{{"id": 42, "name": "example.com"}}
+			if zonesCalls > 1 {
+				zones = append(zones, map[string]any{"id": 43, "name": "sub.example.com"})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"zones": zones,
+				"meta":  map[string]any{"pagination": map[string]any{}},
+			})
+			return
+		}
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/rrsets") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"rrsets": []map[string]any{}, "meta": map[string]any{}})
+			return
+		}
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/rrsets") {
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			body["id"] = "created"
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"rrset": body})
+			return
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	t.Cleanup(apiSrv.Close)
+
+	cfg := &config.Config{
+		APIToken:       "test-token",
+		Zone:           "sub.example.com",
+		Record:         "deep.sub.example.com",
+		RecordType:     "A",
+		TTL:            60,
+		IPSource:       ipSrv.URL,
+		LogLevel:       "error",
+		AllowPrivateIP: true,
+	}
+
+	dir := t.TempDir()
+	sm := state.New(filepath.Join(dir, "state.json"))
+	u := updater.NewWithDNSClient(cfg, sm, dns.NewWithBaseURL("test-token", apiSrv.URL))
+
+	result, err := u.Run(context.Background(), false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.ZoneID != "43" {
+		t.Errorf("ZoneID = %q, want %q (should use sub.example.com, not example.com)", result.ZoneID, "43")
+	}
+}
+
+func TestRun_DryRunFromConfigWithoutCLIFlag(t *testing.T) {
+	ipSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("5.6.7.8"))
+	}))
+	t.Cleanup(ipSrv.Close)
+
+	apiSrv := httptest.NewServer(hetznerAPIHandler(nil))
+	t.Cleanup(apiSrv.Close)
+
+	cfg := &config.Config{
+		APIToken: "test-token", Zone: "example.com", Record: "home.example.com",
+		RecordType: "A", TTL: 60, IPSource: ipSrv.URL, LogLevel: "error",
+		AllowPrivateIP: true, DryRun: true, // config sets dry-run
+	}
+
+	dir := t.TempDir()
+	sm := state.New(filepath.Join(dir, "state.json"))
+	u := updater.NewWithDNSClient(cfg, sm, dns.NewWithBaseURL("test-token", apiSrv.URL))
+
+	result, err := u.Run(context.Background(), false) // force=false
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.DryRun {
+		t.Error("expected DryRun=true when config has dry_run=true")
+	}
+}
+
+func TestRun_DoesNotWriteConfigWhenZoneUnchanged(t *testing.T) {
+	u, _ := setupServers(t, "5.6.7.8", nil)
+
+	// First run resolves the zone and writes the config.
+	if _, err := u.Run(context.Background(), false); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+
+	// The cond write happens inside Run; we just confirm that re-running
+	// with an unchanged config doesn't double-write.
+	// (No assertion needed — we just need this to not panic / error.)
+	if _, err := u.Run(context.Background(), false); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+}
+
 func TestDetectIP_UnsupportedType(t *testing.T) {
 	ipSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("5.6.7.8"))

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 
 	"github.com/bytes-commerce/bytes-dns/internal/config"
 	"github.com/bytes-commerce/bytes-dns/internal/dns"
@@ -79,18 +80,28 @@ func (u *Updater) Run(ctx context.Context, force bool) (*Result, error) {
 
 	zoneID := u.cfg.ZoneID
 	if zoneID == "" {
-		zone, err := u.dnsClient.FindZoneByRecord(ctx, u.cfg.Record)
-		if err != nil {
-			zone, err = u.dnsClient.FindZone(ctx, u.cfg.Zone)
+		resolved, err := u.dnsClient.FindZoneByRecord(ctx, u.cfg.Record)
+		if err != nil || resolved == nil {
+			resolved, err = u.dnsClient.FindZone(ctx, u.cfg.Zone)
+			if err != nil {
+				return nil, err
+			}
+		} else if u.cfg.Zone != "" && !strings.EqualFold(resolved.Name, u.cfg.Zone) {
+			// Suffix match disagrees with the configured zone — fall back to the explicit one.
+			resolved, err = u.dnsClient.FindZone(ctx, u.cfg.Zone)
 			if err != nil {
 				return nil, err
 			}
 		}
-		zoneID = fmt.Sprintf("%d", zone.ID)
-		u.cfg.ZoneID = zoneID
-		u.cfg.Zone = zone.Name
-		if err := u.cfg.Save(""); err != nil {
-			logger.Warn("failed to save resolved zone_id: %v", err)
+		zoneID = fmt.Sprintf("%d", resolved.ID)
+
+		// Only persist the config if the resolved zone is actually new.
+		if u.cfg.ZoneID != zoneID || !strings.EqualFold(u.cfg.Zone, resolved.Name) {
+			u.cfg.ZoneID = zoneID
+			u.cfg.Zone = resolved.Name
+			if err := u.cfg.Save(""); err != nil {
+				logger.Warn("failed to save resolved zone_id: %v", err)
+			}
 		}
 		logger.Debug("resolved zone %q => id=%s", u.cfg.Zone, zoneID)
 	}
@@ -164,15 +175,20 @@ func (u *Updater) Test(ctx context.Context) error {
 	zoneID := u.cfg.ZoneID
 	var zoneName = u.cfg.Zone
 	if zoneID == "" {
-		zone, err := u.dnsClient.FindZoneByRecord(ctx, u.cfg.Record)
-		if err != nil {
-			zone, err = u.dnsClient.FindZone(ctx, u.cfg.Zone)
+		resolved, err := u.dnsClient.FindZoneByRecord(ctx, u.cfg.Record)
+		if err != nil || resolved == nil {
+			resolved, err = u.dnsClient.FindZone(ctx, u.cfg.Zone)
+			if err != nil {
+				return fmt.Errorf("zone lookup failed: %w", err)
+			}
+		} else if u.cfg.Zone != "" && !strings.EqualFold(resolved.Name, u.cfg.Zone) {
+			resolved, err = u.dnsClient.FindZone(ctx, u.cfg.Zone)
 			if err != nil {
 				return fmt.Errorf("zone lookup failed: %w", err)
 			}
 		}
-		zoneID = fmt.Sprintf("%d", zone.ID)
-		zoneName = zone.Name
+		zoneID = fmt.Sprintf("%d", resolved.ID)
+		zoneName = resolved.Name
 	}
 	fmt.Printf("  zone       : %s (id=%s)\n", zoneName, zoneID)
 

@@ -111,6 +111,9 @@ func cmdRun(args []string) {
 	if dryRun {
 		cfg.DryRun = true
 	}
+	if cfg.DryRun {
+		logger.Info("dry-run mode is ACTIVE — no DNS writes will be performed")
+	}
 
 	logger.SetLevel(logger.ParseLevel(cfg.LogLevel))
 
