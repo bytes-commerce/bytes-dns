@@ -100,3 +100,64 @@ func TestAssetForPlatform_Unsupported(t *testing.T) {
 	}()
 	_ = assetForPlatform("darwin", "amd64", "")
 }
+
+func TestDownload_FetchesAsset(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/binary") {
+			_, _ = w.Write([]byte("BINARY-CONTENTS"))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	u := New(Options{
+		BaseURL: srv.URL,
+		Version: "1.0.0",
+		httpGet: defaultHTTPGet,
+	})
+	rel := &Release{
+		Assets: []Asset{{Name: "bytes-dns-linux-amd64", URL: srv.URL + "/binary"}},
+	}
+	got, err := u.Download(context.Background(), rel.Assets[0])
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(got) != "BINARY-CONTENTS" {
+		t.Errorf("downloaded body = %q, want %q", string(got), "BINARY-CONTENTS")
+	}
+}
+
+func TestVerifyChecksum_Match(t *testing.T) {
+	// SHA256 of "hello\n" is 5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03.
+	const want = "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+	body := []byte("hello\n")
+	checksums := []byte(want + "  bytes-dns-linux-amd64\n")
+	if err := verifyChecksum(body, "bytes-dns-linux-amd64", checksums); err != nil {
+		t.Errorf("expected match, got error: %v", err)
+	}
+}
+
+func TestVerifyChecksum_Mismatch(t *testing.T) {
+	body := []byte("hello\n")
+	checksums := []byte("0000000000000000000000000000000000000000000000000000000000000000  bytes-dns-linux-amd64\n")
+	err := verifyChecksum(body, "bytes-dns-linux-amd64", checksums)
+	if err == nil {
+		t.Fatal("expected error on hash mismatch, got nil")
+	}
+	if !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Errorf("expected error to mention checksum mismatch, got: %v", err)
+	}
+}
+
+func TestVerifyChecksum_MissingEntry(t *testing.T) {
+	body := []byte("hello\n")
+	checksums := []byte("5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03  other-asset\n")
+	err := verifyChecksum(body, "bytes-dns-linux-amd64", checksums)
+	if err == nil {
+		t.Fatal("expected error when asset is missing from checksums, got nil")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected error to mention not found, got: %v", err)
+	}
+}

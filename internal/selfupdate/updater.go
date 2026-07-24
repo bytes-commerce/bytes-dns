@@ -7,6 +7,8 @@ package selfupdate
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -193,4 +195,46 @@ func defaultRunCommand(ctx context.Context, name string, args ...string) (string
 func defaultOsRename(oldPath, newPath string) error {
 	// Implemented in Task 5 (used by Apply).
 	return nil
+}
+
+// Download fetches the asset's bytes.
+func (u *Updater) Download(ctx context.Context, asset Asset) ([]byte, error) {
+	ua := fmt.Sprintf(userAgentFmt, u.Version)
+	body, err := u.httpGet(ctx, asset.URL, "application/octet-stream", ua)
+	if err != nil {
+		return nil, fmt.Errorf("downloading %s: %w", asset.Name, err)
+	}
+	return body, nil
+}
+
+// FetchChecksums downloads and returns the checksums.txt for a release.
+func (u *Updater) FetchChecksums(ctx context.Context, rel *Release) ([]byte, error) {
+	for _, a := range rel.Assets {
+		if a.Name == "checksums.txt" {
+			return u.Download(ctx, a)
+		}
+	}
+	return nil, fmt.Errorf("checksums.txt not found in release %s", rel.Tag)
+}
+
+// verifyChecksum checks that body matches the entry in checksums for assetName.
+// Expected format: each line is `<sha256>  <filename>` (one or more whitespace separators).
+func verifyChecksum(body []byte, assetName string, checksums []byte) error {
+	have := sha256.Sum256(body)
+	haveHex := hex.EncodeToString(have[:])
+
+	for _, line := range strings.Split(string(checksums), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		if fields[1] != assetName {
+			continue
+		}
+		if fields[0] != haveHex {
+			return fmt.Errorf("checksum mismatch for %s: have %s, want %s", assetName, haveHex, fields[0])
+		}
+		return nil
+	}
+	return fmt.Errorf("checksum entry for %s not found in checksums.txt", assetName)
 }
