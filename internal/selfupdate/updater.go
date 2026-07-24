@@ -50,10 +50,10 @@ type Updater struct {
 	User      string // user the timer runs as (template instance)
 
 	// Hooks for testing. Defaults call the real OS / network.
-	RootCheck   func() error
-	httpGet     func(ctx context.Context, url, accept, userAgent string) ([]byte, error)
-	runCommand  func(ctx context.Context, name string, args ...string) (string, error)
-	osRename    func(oldPath, newPath string) error
+	RootCheck  func() error
+	httpGet    func(ctx context.Context, url, accept, userAgent string) ([]byte, error)
+	runCommand func(ctx context.Context, name string, args ...string) (string, error)
+	osRename   func(oldPath, newPath string) error
 }
 
 // Options configures a new Updater.
@@ -123,6 +123,31 @@ func (u *Updater) Latest(ctx context.Context) (*Release, error) {
 		rel.Assets = append(rel.Assets, Asset{Name: a.Name, URL: a.URL})
 	}
 	return rel, nil
+}
+
+// assetForPlatform returns the release asset name for the given GOOS/GOARCH/GOARM.
+func assetForPlatform(goos, goarch, goarm string) string {
+	switch {
+	case goos == "linux" && goarch == "amd64":
+		return "bytes-dns-linux-amd64"
+	case goos == "linux" && goarch == "arm64":
+		return "bytes-dns-linux-arm64"
+	case goos == "linux" && goarch == "arm" && goarm == "7":
+		return "bytes-dns-linux-armv7"
+	default:
+		panic(fmt.Sprintf("no prebuilt binary for %s/%s (GOARM=%s); build from source", goos, goarch, goarm))
+	}
+}
+
+// FindAsset returns the release asset matching the current platform.
+func (u *Updater) FindAsset(rel *Release, goos, goarch, goarm string) (*Asset, error) {
+	want := assetForPlatform(goos, goarch, goarm)
+	for i := range rel.Assets {
+		if rel.Assets[i].Name == want {
+			return &rel.Assets[i], nil
+		}
+	}
+	return nil, fmt.Errorf("asset %q not found in release %s", want, rel.Tag)
 }
 
 func defaultRootCheck() error {

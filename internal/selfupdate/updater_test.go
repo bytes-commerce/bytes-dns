@@ -71,3 +71,32 @@ func TestLatest_TrimsVPrefix(t *testing.T) {
 		t.Errorf("Tag = %q, want %q (v prefix should be stripped)", rel.Tag, "2.0.0")
 	}
 }
+
+func TestAssetForPlatform(t *testing.T) {
+	tests := []struct {
+		goos, goarch, goarm string
+		want                string
+	}{
+		{"linux", "amd64", "", "bytes-dns-linux-amd64"},
+		{"linux", "arm64", "", "bytes-dns-linux-arm64"},
+		{"linux", "arm", "7", "bytes-dns-linux-armv7"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.goos+"-"+tt.goarch+"-"+tt.goarm, func(t *testing.T) {
+			got := assetForPlatform(tt.goos, tt.goarch, tt.goarm)
+			if got != tt.want {
+				t.Errorf("assetForPlatform(%q, %q, %q) = %q, want %q",
+					tt.goos, tt.goarch, tt.goarm, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAssetForPlatform_Unsupported(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Errorf("expected panic for unsupported platform darwin/amd64")
+		}
+	}()
+	_ = assetForPlatform("darwin", "amd64", "")
+}
