@@ -14,6 +14,7 @@ import (
 	"github.com/bytes-commerce/bytes-dns/internal/dns"
 	"github.com/bytes-commerce/bytes-dns/internal/installer"
 	"github.com/bytes-commerce/bytes-dns/internal/logger"
+	"github.com/bytes-commerce/bytes-dns/internal/selfupdate"
 	"github.com/bytes-commerce/bytes-dns/internal/state"
 	"github.com/bytes-commerce/bytes-dns/internal/updater"
 )
@@ -36,6 +37,7 @@ Commands:
   setup      Interactive configuration (API Key, Domain, Records)
   install    Install systemd service and timer units
   uninstall  Remove systemd units and binary
+  update     Fetch the latest release from GitHub and replace the binary
   version    Print version information
 
 Flags (for 'run'):
@@ -73,6 +75,8 @@ func main() {
 		cmdInstall()
 	case "uninstall":
 		cmdUninstall()
+	case "update":
+		cmdUpdate(args)
 	case "version":
 		cmdVersion()
 	case "--help", "-h", "help":
@@ -398,6 +402,92 @@ func cmdUninstall() {
 		os.Exit(1)
 	}
 	fmt.Println("bytes-dns uninstalled.")
+}
+
+func cmdUpdate(args []string) {
+	var (
+		check bool
+		force bool
+	)
+	for _, a := range args {
+		switch a {
+		case "--check":
+			check = true
+		case "--force":
+			force = true
+		case "--help", "-h":
+			fmt.Print(`bytes-dns update - fetch and apply the latest release
+
+Usage:
+  bytes-dns update [--check] [--force]
+
+Flags:
+  --check   Only check whether an update is available; do not download or apply.
+  --force   Re-install the current version even if it matches the latest.
+`)
+			return
+		default:
+			fmt.Fprintf(os.Stderr, "unknown flag: %q\n", a)
+			os.Exit(2)
+		}
+	}
+
+	u := selfupdate.New(selfupdate.Options{
+		RepoOwner: "bytes-commerce",
+		RepoName:  "bytes-dns",
+		Version:   Version,
+	})
+	if err := u.RootCheck(); err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR: bytes-dns update must be run as root (sudo bytes-dns update)")
+		os.Exit(2)
+	}
+
+	// Locate the running binary's directory.
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: cannot determine executable path: %v\n", err)
+		os.Exit(2)
+	}
+	u.BinaryDir = filepath.Dir(exe)
+
+	// Determine the user (the same logic as cmdInstall).
+	user := os.Getenv("SUDO_USER")
+	if user == "" {
+		user = os.Getenv("USER")
+	}
+	if user == "" || user == "root" {
+		user = "bytes-dns"
+	}
+	u.User = user
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if check {
+		result, err := u.Check(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+			os.Exit(2)
+		}
+		fmt.Printf("current: %s, latest: %s\n", result.Current, result.Latest)
+		if result.UpdateAvailable {
+			os.Exit(1)
+		}
+		return
+	}
+
+	result, err := u.Update(ctx, selfupdate.UpdateOptions{Force: force})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+		os.Exit(2)
+	}
+
+	switch result.Action {
+	case selfupdate.ActionNoChange:
+		fmt.Printf("already on v%s, nothing to do\n", result.Current)
+	case selfupdate.ActionUpdated:
+		fmt.Printf("updated from v%s to v%s\n", result.Current, result.Latest)
+	}
 }
 
 func buildInstaller() (*installer.Installer, error) {
