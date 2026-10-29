@@ -113,7 +113,7 @@ func TestRun_CreateNewRecord(t *testing.T) {
 
 func TestRun_UpdateExistingRecord(t *testing.T) {
 	existing := &dns.RRSet{
-		ID: "home/A", Name: "home", Type: "A", TTL: 60, Zone: 42,
+		ID: "home/A", Name: "home", Type: "A", TTL: 60, Zone: "42",
 		Records: []dns.RecordValue{{Value: "1.2.3.4"}},
 	}
 	u, _ := setupServers(t, "9.9.9.9", existing)
@@ -133,7 +133,7 @@ func TestRun_UpdateExistingRecord(t *testing.T) {
 
 func TestRun_NoChangeWhenIPMatches(t *testing.T) {
 	existing := &dns.RRSet{
-		ID: "home/A", Name: "home", Type: "A", TTL: 60, Zone: 42,
+		ID: "home/A", Name: "home", Type: "A", TTL: 60, Zone: "42",
 		Records: []dns.RecordValue{{Value: "1.2.3.4"}},
 	}
 	u, _ := setupServers(t, "1.2.3.4", existing)
@@ -150,7 +150,7 @@ func TestRun_NoChangeWhenIPMatches(t *testing.T) {
 
 func TestRun_SkipsAPIWhenCacheMatches(t *testing.T) {
 	existing := &dns.RRSet{
-		ID: "home/A", Name: "home", Type: "A", TTL: 60, Zone: 42,
+		ID: "home/A", Name: "home", Type: "A", TTL: 60, Zone: "42",
 		Records: []dns.RecordValue{{Value: "1.2.3.4"}},
 	}
 	u, sm := setupServers(t, "1.2.3.4", existing)
@@ -170,7 +170,7 @@ func TestRun_SkipsAPIWhenCacheMatches(t *testing.T) {
 
 func TestRun_ForceBypassesCache(t *testing.T) {
 	existing := &dns.RRSet{
-		ID: "home/A", Name: "home", Type: "A", TTL: 60, Zone: 42,
+		ID: "home/A", Name: "home", Type: "A", TTL: 60, Zone: "42",
 		Records: []dns.RecordValue{{Value: "1.2.3.4"}},
 	}
 	u, sm := setupServers(t, "1.2.3.4", existing)

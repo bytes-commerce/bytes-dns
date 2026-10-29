@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`bytes-dns` is a DynDNS updater for Hetzner DNS that keeps a DNS record in sync with your public IP. It runs as a systemd timer, updates only when IP changes, and compiles to a single static binary.
+`bytes-dns` is a DynDNS updater for Hetzner DNS (and optionally Cloudflare) that keeps a DNS record in sync with your public IP. It runs as a systemd timer, updates only when IP changes, and compiles to a single static binary.
 
-**API Note**: Uses Hetzner Cloud DNS API v1 (`dns.hetzner.com/api/v1`) — not the deprecated DNS Console API.
+**API Note**: Uses Hetzner Cloud DNS API v1 (`dns.hetzner.com/api/v1`) — not the deprecated DNS Console API. Cloudflare support uses DNS API v4 (`api.cloudflare.com/client/v4`) with an API token.
 
 ## Build, Lint, and Test Commands
 
@@ -36,33 +36,46 @@ make fmt
 cmd/bytes-dns/main.go     # CLI entry point, command routing
 internal/
   config/                  # Config loading, validation, defaults
-  dns/                    # Hetzner Cloud DNS API client
-  ip/                     # Public IP detection (IPv4/IPv6)
-  logger/                 # Minimal structured logger (stderr)
-  state/                  # Local state file (prevents redundant API calls)
-  updater/                # Core orchestration logic
+  cloudflare/              # Cloudflare DNS API v4 client
+  dns/                     # Hetzner Cloud DNS API client + provider interface
+  httpx/                   # Shared HTTP client (retry policy, typed errors)
+  ip/                      # Public IP detection (IPv4/IPv6)
+  logger/                  # Minimal structured logger (stderr)
+  state/                   # Local state file (prevents redundant API calls)
+  updater/                 # Core orchestration logic
 ```
 
 ### Key Design Patterns
 
-- **`updater.Updater`** is the central orchestrator. It uses a `dnsClient` interface, allowing tests to inject a mock DNS client.
+- **`updater.Updater`** is the central orchestrator. It uses the `dns.Provider` interface, allowing tests to inject a mock DNS client.
+- **Multi-provider**: `config.ProviderConfigs()` returns every configured provider (Hetzner first, Cloudflare second). The CLI runs them one after another and aborts on the first error. Each provider keeps its own state entry, so one provider never suppresses the update of another.
+- **Provider neutral records**: `dns.Provider` addresses zones by their opaque ID (`dns.ZoneID`) and records by their fully qualified name. The Hetzner client converts the FQDN into the relative label the Hetzner API expects, Cloudflare uses the FQDN as is.
 - **Zone resolution**: `FindZoneByRecord` uses longest-suffix match across all zones in the account — this enables records to be updated without explicitly configuring `zone_id`.
-- **State caching**: `state.Manager` stores the last known IP locally. The updater skips API calls when IP hasn't changed since last check.
+- **State caching**: `state.Manager` stores the last known IP per provider locally. The updater skips API calls when the IP hasn't changed since the last check of that provider.
 - **Config security**: Config file permissions (600) are enforced at load time.
+- **Cloudflare proxy flag**: `proxied` is only applied when a record is created. Updates patch the content only, so the proxy status of an existing record is never changed.
 
 ### Dependency Flow
 
 ```
 main.go → updater.Run()
          ├── config.Load()          # Validates config.json
-         ├── state.Manager.Load()   # Reads last known IP
-         ├── ip.Detector.DetectIPv4/IPv6  # Fetches current public IP
-         └── dns.Client
+         ├── config.ProviderConfigs()  # Hetzner and/or Cloudflare
+         ├── state.Manager.Load()   # Reads last known IP per provider
+         ├── ip.Detector.DetectIPv4/IPv6  # Fetches current public IP (shared)
+         └── dns.Provider
               ├── FindZoneByRecord()  # Longest-suffix zone match
               ├── FindRRSet()         # Lookup existing record
               ├── CreateRRSet()       # Create if missing
               └── UpdateRRSet()       # Update if IP changed
 ```
+
+### Cloudflare API Concepts
+
+- **Zone**: a DNS zone in the Cloudflare account, addressed by a 32 character hex ID
+- **Record**: a single DNS record (one content value each), identified by its own ID
+- **Envelope**: every Cloudflare response carries `success`, `errors` and `result` — errors are often returned with HTTP 200
+- **Proxied**: whether Cloudflare proxies the traffic for a record ("orange cloud")
 
 ### Hetzner DNS API Concepts
 

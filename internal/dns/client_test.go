@@ -138,6 +138,11 @@ func (m *hetznerMock) handler() http.Handler {
 	return mux
 }
 
+// testZone returns the zone used by the record tests.
+func testZone() *dns.Zone {
+	return &dns.Zone{ID: "42", Name: "example.com"}
+}
+
 func newTestClient(t *testing.T, mock *hetznerMock) (*dns.Client, *httptest.Server) {
 	t.Helper()
 	srv := httptest.NewServer(mock.handler())
@@ -159,8 +164,8 @@ func TestFindZone_Found(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if zone.ID != 42 {
-		t.Errorf("zone ID = %d, want %d", zone.ID, 42)
+	if zone.ID != "42" {
+		t.Errorf("zone ID = %q, want %q", zone.ID, "42")
 	}
 	if zone.Name != "example.com" {
 		t.Errorf("zone Name = %q, want %q", zone.Name, "example.com")
@@ -203,7 +208,7 @@ func TestFindRRSet_Found(t *testing.T) {
 	}
 	client, _ := newTestClient(t, mock)
 
-	rr, err := client.FindRRSet(context.Background(), "42", "home", "A")
+	rr, err := client.FindRRSet(context.Background(), testZone(), "home.example.com", "A")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -232,7 +237,7 @@ func TestUpdateRRSet(t *testing.T) {
 		},
 	}
 
-	updated, err := client.UpdateRRSet(context.Background(), "42", existing, "9.9.9.9")
+	updated, err := client.UpdateRRSet(context.Background(), testZone(), existing, "9.9.9.9")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -248,7 +253,7 @@ func TestCreateRRSet(t *testing.T) {
 	mock := &hetznerMock{}
 	client, _ := newTestClient(t, mock)
 
-	created, err := client.CreateRRSet(context.Background(), "42", "newhost", "A", "10.0.0.1", 60)
+	created, err := client.CreateRRSet(context.Background(), testZone(), "newhost.example.com", "A", "10.0.0.1", 60, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -261,8 +266,8 @@ func TestCreateRRSet(t *testing.T) {
 	if created.TTL != 60 {
 		t.Errorf("created TTL = %d, want 60", created.TTL)
 	}
-	if created.Zone != 42 {
-		t.Errorf("created Zone = %d, want 42", created.Zone)
+	if created.Zone != "42" {
+		t.Errorf("created Zone = %q, want %q", created.Zone, "42")
 	}
 	if len(created.Records) != 1 || created.Records[0].Value != "10.0.0.1" {
 		t.Errorf("created Records = %+v, want [{10.0.0.1}]", created.Records)
@@ -283,7 +288,7 @@ func TestUpdateRRSet_ActionError(t *testing.T) {
 		},
 	}
 
-	_, err := client.UpdateRRSet(context.Background(), "42", existing, "9.9.9.9")
+	_, err := client.UpdateRRSet(context.Background(), testZone(), existing, "9.9.9.9")
 	if err == nil {
 		t.Fatal("expected error from action polling, got nil")
 	}
@@ -304,14 +309,14 @@ func TestFindZoneByRecord(t *testing.T) {
 
 	tests := []struct {
 		record string
-		wantID int
+		wantID string
 	}{
-		{"home.example.com", 42},
-		{"home.sub.example.com", 43},
-		{"example.com", 42},
-		{"sub.example.com", 43},
-		{"other.org", 44},
-		{"www.other.org", 44},
+		{"home.example.com", "42"},
+		{"home.sub.example.com", "43"},
+		{"example.com", "42"},
+		{"sub.example.com", "43"},
+		{"other.org", "44"},
+		{"www.other.org", "44"},
 	}
 
 	for _, tt := range tests {
@@ -320,8 +325,8 @@ func TestFindZoneByRecord(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if zone.ID != tt.wantID {
-				t.Errorf("zone ID = %d, want %d", zone.ID, tt.wantID)
+			if string(zone.ID) != tt.wantID {
+				t.Errorf("zone ID = %q, want %q", zone.ID, tt.wantID)
 			}
 		})
 	}
@@ -338,8 +343,8 @@ func TestCreateZone(t *testing.T) {
 	if zone.Name != "newzone.com" {
 		t.Errorf("zone Name = %q, want %q", zone.Name, "newzone.com")
 	}
-	if zone.ID != 999 {
-		t.Errorf("zone ID = %d, want %d", zone.ID, 999)
+	if zone.ID != "999" {
+		t.Errorf("zone ID = %q, want %q", zone.ID, "999")
 	}
 }
 
@@ -396,8 +401,8 @@ func TestClient_RetriesOn5xx(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error after retries: %v", err)
 	}
-	if zone.ID != 42 {
-		t.Errorf("zone ID = %d, want 42", zone.ID)
+	if zone.ID != "42" {
+		t.Errorf("zone ID = %q, want %q", zone.ID, "42")
 	}
 	if calls != 3 {
 		t.Errorf("calls = %d, want 3 (succeeded on 3rd attempt)", calls)
@@ -481,7 +486,7 @@ func TestUpdateRRSet_DoesNotMutateInput(t *testing.T) {
 	beforeRecords := make([]dns.RecordValue, len(original.Records))
 	copy(beforeRecords, original.Records)
 
-	_, err := client.UpdateRRSet(context.Background(), "42", original, "9.9.9.9")
+	_, err := client.UpdateRRSet(context.Background(), testZone(), original, "9.9.9.9")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

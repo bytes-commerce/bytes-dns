@@ -1,5 +1,6 @@
 {
   "_comment": "copy this file to ~/.bytes-dns/config.json and set permissions: chmod 600 ~/.bytes-dns/config.json",
+  "_comment_cloudflare": "to sync the record with Cloudflare as well, add a \"cloudflare\" block with an API token (Zone:Read + Zone:DNS:Edit), e.g. \"cloudflare\": {\"api_token\": \"...\", \"zone\": \"example.com\", \"record\": \"home.example.com\"} - see the README section \"Cloudflare\"",
   "api_token": "YOUR_HETZNER_API_TOKEN",
   "zone": "example.com",
   "record": "home.example.com",

@@ -1,9 +1,41 @@
 package dns
 
-import "time"
+import (
+	"encoding/json"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// ZoneID identifies a DNS zone. Hetzner uses numeric IDs, Cloudflare uses
+// 32 character hex strings, so the ID is kept as an opaque string.
+type ZoneID string
+
+func (z ZoneID) String() string { return string(z) }
+
+// UnmarshalJSON accepts both JSON numbers (Hetzner) and JSON strings
+// (Cloudflare).
+func (z *ZoneID) UnmarshalJSON(data []byte) error {
+	raw := strings.Trim(strings.TrimSpace(string(data)), `"`)
+	if raw == "" || raw == "null" {
+		*z = ""
+		return nil
+	}
+	*z = ZoneID(raw)
+	return nil
+}
+
+// MarshalJSON writes plain IDs as strings and numeric IDs as numbers so the
+// Hetzner API keeps receiving the format it expects.
+func (z ZoneID) MarshalJSON() ([]byte, error) {
+	if n, err := strconv.ParseInt(string(z), 10, 64); err == nil {
+		return json.Marshal(n)
+	}
+	return json.Marshal(string(z))
+}
 
 type Zone struct {
-	ID        int       `json:"id"`
+	ID        ZoneID    `json:"id"`
 	Name      string    `json:"name"`
 	Created   time.Time `json:"created"`
 	TTL       int       `json:"ttl"`
@@ -18,12 +50,24 @@ type RRSet struct {
 	Type    string        `json:"type"`
 	TTL     int           `json:"ttl"`
 	Records []RecordValue `json:"records"`
-	Zone    int           `json:"zone"`
+	Zone    ZoneID        `json:"zone"`
+	// Proxied reports whether the record is routed through the provider's
+	// proxy. It is nil for providers that do not support proxying.
+	Proxied *bool `json:"proxied,omitempty"`
 }
 
 type RecordValue struct {
 	Value   string `json:"value"`
 	Comment string `json:"comment"`
+}
+
+// CreateOptions carries provider specific options for record creation.
+// Providers that do not understand an option simply ignore it.
+type CreateOptions struct {
+	// Proxied enables Cloudflare's proxying for a newly created record.
+	// A nil value means "use the provider default"; false explicitly asks
+	// for a DNS-only record. It is never applied to existing records.
+	Proxied *bool
 }
 
 type Meta struct {
@@ -61,7 +105,7 @@ type createZoneResponse struct {
 // of an rrset. It supersedes the older PUT /rrsets/{name}/{type} endpoint.
 type setRecordsRequest struct {
 	Records []RecordValue `json:"records"`
-	TTL     *int           `json:"ttl,omitempty"`
+	TTL     *int          `json:"ttl,omitempty"`
 }
 
 // Action represents a Hetzner Cloud API async action.

@@ -6,6 +6,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/bytes-commerce/bytes-dns/internal/cloudflare"
 	"github.com/bytes-commerce/bytes-dns/internal/config"
 	"github.com/bytes-commerce/bytes-dns/internal/dns"
 	"github.com/bytes-commerce/bytes-dns/internal/ip"
@@ -13,18 +14,11 @@ import (
 	"github.com/bytes-commerce/bytes-dns/internal/state"
 )
 
-type dnsClient interface {
-	FindZone(ctx context.Context, zoneName string) (*dns.Zone, error)
-	FindZoneByRecord(ctx context.Context, recordName string) (*dns.Zone, error)
-	FindRRSet(ctx context.Context, zoneID, name, recordType string) (*dns.RRSet, error)
-	UpdateRRSet(ctx context.Context, zoneID string, rrset *dns.RRSet, newValue string) (*dns.RRSet, error)
-	CreateRRSet(ctx context.Context, zoneID, name, recordType, value string, ttl int) (*dns.RRSet, error)
-}
-
 type Result struct {
 	PublicIP string
 	RecordID string
 	ZoneID   string
+	Provider string
 	Action   Action
 	DryRun   bool
 }
@@ -38,31 +32,91 @@ const (
 	ActionSkipped  Action = "skipped"
 )
 
+// Options describes the updater that should be built.
+type Options struct {
+	// Config is the loaded configuration. It is used for the dry run flag
+	// and to persist resolved zone IDs.
+	Config *config.Config
+	// State is the local state manager.
+	State *state.Manager
+	// Provider describes the provider this updater synchronises.
+	Provider config.ProviderConfig
+	// Client is the API client of the provider.
+	Client dns.Provider
+	// Detector detects the public IP. It may be shared between providers so
+	// the address is only looked up once per run.
+	Detector *ip.Detector
+}
+
 type Updater struct {
 	cfg          *config.Config
-	dnsClient    dnsClient
+	prov         config.ProviderConfig
+	dnsClient    dns.Provider
 	ipDetector   *ip.Detector
 	stateManager *state.Manager
 }
 
+// New returns an updater for the primary provider using the Hetzner API.
 func New(cfg *config.Config, sm *state.Manager) *Updater {
 	return NewWithDNSClient(cfg, sm, dns.New(cfg.APIToken))
 }
 
-func NewWithDNSClient(cfg *config.Config, sm *state.Manager, client dnsClient) *Updater {
+// NewWithDNSClient returns an updater for the primary provider with an
+// injected client. It exists so tests can supply a mock.
+func NewWithDNSClient(cfg *config.Config, sm *state.Manager, client dns.Provider) *Updater {
+	return NewForProvider(Options{
+		Config:   cfg,
+		State:    sm,
+		Provider: cfg.PrimaryProvider(),
+		Client:   client,
+	})
+}
+
+// NewForProvider returns an updater bound to a single provider.
+func NewForProvider(opts Options) *Updater {
+	detector := opts.Detector
+	if detector == nil {
+		detector = ip.NewWithSources(opts.Config.IPSources())
+	}
+
 	return &Updater{
-		cfg:          cfg,
-		dnsClient:    client,
-		ipDetector:   ip.NewWithSources(cfg.IPSources()),
-		stateManager: sm,
+		cfg:          opts.Config,
+		prov:         opts.Provider,
+		dnsClient:    opts.Client,
+		ipDetector:   detector,
+		stateManager: opts.State,
 	}
 }
 
-func (u *Updater) Run(ctx context.Context, force bool) (*Result, error) {
+// NewClientForProvider builds the API client for the given provider.
+func NewClientForProvider(prov config.ProviderConfig) (dns.Provider, error) {
+	switch prov.Key {
+	case config.ProviderHetzner:
+		return dns.New(prov.APIToken), nil
+	case config.ProviderCloudflare:
+		return cloudflare.New(cloudflare.Options{
+			APIToken: prov.APIToken,
+			Zone:     prov.Zone,
+			ZoneID:   prov.ZoneID,
+		}), nil
+	default:
+		return nil, fmt.Errorf("unknown DNS provider %q", prov.Key)
+	}
+}
+
+func (u *Updater) Run(ctx context.Context, force bool) (result *Result, err error) {
 	st, err := u.stateManager.Load()
 	if err != nil {
 		return nil, fmt.Errorf("loading state: %w", err)
 	}
+
+	// Remember a failed run so that "bytes-dns status" can show it. The
+	// last known IP stays untouched, so the next run still updates.
+	defer func() {
+		if err != nil {
+			_ = u.stateManager.MarkErrorFor(st, u.prov.Key, err)
+		}
+	}()
 
 	currentIP, err := u.detectIP(ctx)
 	if err != nil {
@@ -70,50 +124,24 @@ func (u *Updater) Run(ctx context.Context, force bool) (*Result, error) {
 	}
 
 	ipStr := currentIP.String()
-	logger.Info("detected public IP: %s", ipStr)
+	logger.Info("[%s] detected public IP: %s", u.prov.Key, ipStr)
 
-	if !force && st.LastIP == ipStr {
-		logger.Info("IP unchanged (%s) - no update needed", ipStr)
-		_ = u.stateManager.MarkChecked(st)
-		return &Result{PublicIP: ipStr, Action: ActionNoChange}, nil
+	if !force && u.stateManager.LastIPFor(st, u.prov.Key) == ipStr {
+		logger.Info("[%s] IP unchanged (%s) - no update needed", u.prov.Key, ipStr)
+		_ = u.stateManager.MarkCheckedFor(st, u.prov.Key)
+		return &Result{PublicIP: ipStr, Provider: u.prov.Key, Action: ActionNoChange}, nil
 	}
 
-	zoneID := u.cfg.ZoneID
-	if zoneID == "" {
-		resolved, err := u.dnsClient.FindZoneByRecord(ctx, u.cfg.Record)
-		if err != nil || resolved == nil {
-			resolved, err = u.dnsClient.FindZone(ctx, u.cfg.Zone)
-			if err != nil {
-				return nil, err
-			}
-		} else if u.cfg.Zone != "" && !strings.EqualFold(resolved.Name, u.cfg.Zone) {
-			// Suffix match disagrees with the configured zone — fall back to the explicit one.
-			resolved, err = u.dnsClient.FindZone(ctx, u.cfg.Zone)
-			if err != nil {
-				return nil, err
-			}
-		}
-		zoneID = fmt.Sprintf("%d", resolved.ID)
-
-		// Only persist the config if the resolved zone is actually new.
-		if u.cfg.ZoneID != zoneID || !strings.EqualFold(u.cfg.Zone, resolved.Name) {
-			u.cfg.ZoneID = zoneID
-			u.cfg.Zone = resolved.Name
-			if err := u.cfg.Save(""); err != nil {
-				logger.Warn("failed to save resolved zone_id: %v", err)
-			}
-		}
-		logger.Debug("resolved zone %q => id=%s", u.cfg.Zone, zoneID)
+	if err := u.checkApex(); err != nil {
+		return nil, err
 	}
 
-	label := u.cfg.RecordLabel()
-	logger.Debug("record label: %q (record=%s, zone=%s)", label, u.cfg.Record, u.cfg.Zone)
-
-	if label == "@" {
-		return nil, fmt.Errorf("refusing to operate on zone apex record %q — use a subdomain instead (e.g. \"home.%s\")", u.cfg.Record, u.cfg.Zone)
+	zone, err := u.resolveZone(ctx)
+	if err != nil {
+		return nil, err
 	}
 
-	rrset, err := u.dnsClient.FindRRSet(ctx, zoneID, label, u.cfg.RecordType)
+	rrset, err := u.dnsClient.FindRRSet(ctx, zone, u.prov.Record, u.prov.RecordType)
 	if err != nil {
 		return nil, err
 	}
@@ -126,45 +154,45 @@ func (u *Updater) Run(ctx context.Context, force bool) (*Result, error) {
 	if u.cfg.DryRun {
 		if rrset != nil {
 			if currentRecordValue == ipStr {
-				logger.Info("[dry-run] record %s %s = %s — no change needed", u.cfg.RecordType, u.cfg.Record, ipStr)
-				return &Result{PublicIP: ipStr, RecordID: rrset.ID, ZoneID: zoneID, Action: ActionNoChange, DryRun: true}, nil
+				logger.Info("[%s] [dry-run] record %s %s = %s - no change needed", u.prov.Key, u.prov.RecordType, u.prov.Record, ipStr)
+				return &Result{PublicIP: ipStr, RecordID: rrset.ID, ZoneID: string(zone.ID), Provider: u.prov.Key, Action: ActionNoChange, DryRun: true}, nil
 			}
-			logger.Info("[dry-run] would update record %s %s: %s => %s", u.cfg.RecordType, u.cfg.Record, currentRecordValue, ipStr)
-			return &Result{PublicIP: ipStr, RecordID: rrset.ID, ZoneID: zoneID, Action: ActionUpdated, DryRun: true}, nil
+			logger.Info("[%s] [dry-run] would update record %s %s: %s => %s", u.prov.Key, u.prov.RecordType, u.prov.Record, currentRecordValue, ipStr)
+			return &Result{PublicIP: ipStr, RecordID: rrset.ID, ZoneID: string(zone.ID), Provider: u.prov.Key, Action: ActionUpdated, DryRun: true}, nil
 		}
-		logger.Info("[dry-run] would create record %s %s = %s", u.cfg.RecordType, u.cfg.Record, ipStr)
-		return &Result{PublicIP: ipStr, ZoneID: zoneID, Action: ActionCreated, DryRun: true}, nil
+		logger.Info("[%s] [dry-run] would create record %s %s = %s", u.prov.Key, u.prov.RecordType, u.prov.Record, ipStr)
+		return &Result{PublicIP: ipStr, ZoneID: string(zone.ID), Provider: u.prov.Key, Action: ActionCreated, DryRun: true}, nil
 	}
 
 	if rrset != nil {
 		if currentRecordValue == ipStr {
-			logger.Info("DNS record already correct (%s %s = %s) — no API write needed", u.cfg.RecordType, u.cfg.Record, ipStr)
-			_ = u.stateManager.MarkUpdated(st, ipStr, rrset.ID)
-			return &Result{PublicIP: ipStr, RecordID: rrset.ID, ZoneID: zoneID, Action: ActionNoChange}, nil
+			logger.Info("[%s] DNS record already correct (%s %s = %s) - no API write needed", u.prov.Key, u.prov.RecordType, u.prov.Record, ipStr)
+			_ = u.stateManager.MarkUpdatedFor(st, u.prov.Key, ipStr, rrset.ID)
+			return &Result{PublicIP: ipStr, RecordID: rrset.ID, ZoneID: string(zone.ID), Provider: u.prov.Key, Action: ActionNoChange}, nil
 		}
 
-		logger.Info("updating %s record %s: %s => %s", u.cfg.RecordType, u.cfg.Record, currentRecordValue, ipStr)
-		updated, err := u.dnsClient.UpdateRRSet(ctx, zoneID, rrset, ipStr)
+		logger.Info("[%s] updating %s record %s: %s => %s", u.prov.Key, u.prov.RecordType, u.prov.Record, currentRecordValue, ipStr)
+		updated, err := u.dnsClient.UpdateRRSet(ctx, zone, rrset, ipStr)
 		if err != nil {
 			return nil, fmt.Errorf("DNS update failed: %w", err)
 		}
-		_ = u.stateManager.MarkUpdated(st, ipStr, updated.ID)
-		logger.Info("record updated successfully (id=%s)", updated.ID)
-		return &Result{PublicIP: ipStr, RecordID: updated.ID, ZoneID: zoneID, Action: ActionUpdated}, nil
+		_ = u.stateManager.MarkUpdatedFor(st, u.prov.Key, ipStr, updated.ID)
+		logger.Info("[%s] record updated successfully (id=%s)", u.prov.Key, updated.ID)
+		return &Result{PublicIP: ipStr, RecordID: updated.ID, ZoneID: string(zone.ID), Provider: u.prov.Key, Action: ActionUpdated}, nil
 	}
 
-	logger.Info("creating %s record %s = %s (ttl=%d)", u.cfg.RecordType, u.cfg.Record, ipStr, u.cfg.TTL)
-	created, err := u.dnsClient.CreateRRSet(ctx, zoneID, label, u.cfg.RecordType, ipStr, u.cfg.TTL)
+	logger.Info("[%s] creating %s record %s = %s (ttl=%d)", u.prov.Key, u.prov.RecordType, u.prov.Record, ipStr, u.prov.TTL)
+	created, err := u.dnsClient.CreateRRSet(ctx, zone, u.prov.Record, u.prov.RecordType, ipStr, u.prov.TTL, &dns.CreateOptions{Proxied: u.prov.Proxied})
 	if err != nil {
 		return nil, fmt.Errorf("DNS create failed: %w", err)
 	}
-	_ = u.stateManager.MarkUpdated(st, ipStr, created.ID)
-	logger.Info("record created successfully (id=%s)", created.ID)
-	return &Result{PublicIP: ipStr, RecordID: created.ID, ZoneID: zoneID, Action: ActionCreated}, nil
+	_ = u.stateManager.MarkUpdatedFor(st, u.prov.Key, ipStr, created.ID)
+	logger.Info("[%s] record created successfully (id=%s)", u.prov.Key, created.ID)
+	return &Result{PublicIP: ipStr, RecordID: created.ID, ZoneID: string(zone.ID), Provider: u.prov.Key, Action: ActionCreated}, nil
 }
 
 func (u *Updater) Test(ctx context.Context) error {
-	fmt.Println("=== bytes-dns connection test ===")
+	fmt.Printf("=== bytes-dns connection test (%s) ===\n", u.prov.Key)
 
 	currentIP, err := u.detectIP(ctx)
 	if err != nil {
@@ -172,33 +200,19 @@ func (u *Updater) Test(ctx context.Context) error {
 	}
 	fmt.Printf("  public IP  : %s\n", currentIP)
 
-	zoneID := u.cfg.ZoneID
-	var zoneName = u.cfg.Zone
-	if zoneID == "" {
-		resolved, err := u.dnsClient.FindZoneByRecord(ctx, u.cfg.Record)
-		if err != nil || resolved == nil {
-			resolved, err = u.dnsClient.FindZone(ctx, u.cfg.Zone)
-			if err != nil {
-				return fmt.Errorf("zone lookup failed: %w", err)
-			}
-		} else if u.cfg.Zone != "" && !strings.EqualFold(resolved.Name, u.cfg.Zone) {
-			resolved, err = u.dnsClient.FindZone(ctx, u.cfg.Zone)
-			if err != nil {
-				return fmt.Errorf("zone lookup failed: %w", err)
-			}
-		}
-		zoneID = fmt.Sprintf("%d", resolved.ID)
-		zoneName = resolved.Name
+	if err := u.checkApex(); err != nil {
+		return err
 	}
-	fmt.Printf("  zone       : %s (id=%s)\n", zoneName, zoneID)
 
-	label := u.cfg.RecordLabel()
-	if label == "@" {
-		return fmt.Errorf("record %q is the zone apex — test cannot operate on zone apex records; use a subdomain instead (e.g. \"home.%s\")", u.cfg.Record, u.cfg.Zone)
+	zone, err := u.resolveZone(ctx)
+	if err != nil {
+		return fmt.Errorf("zone lookup failed: %w", err)
 	}
-	fmt.Printf("  record     : %s %s (label=%q)\n", u.cfg.RecordType, u.cfg.Record, label)
+	fmt.Printf("  zone       : %s (id=%s)\n", zone.Name, zone.ID)
 
-	rrset, err := u.dnsClient.FindRRSet(ctx, zoneID, label, u.cfg.RecordType)
+	fmt.Printf("  record     : %s %s\n", u.prov.RecordType, u.prov.Record)
+
+	rrset, err := u.dnsClient.FindRRSet(ctx, zone, u.prov.Record, u.prov.RecordType)
 	if err != nil {
 		return fmt.Errorf("record lookup failed: %w", err)
 	}
@@ -208,29 +222,78 @@ func (u *Updater) Test(ctx context.Context) error {
 		currentRecordValue = rrset.Records[0].Value
 	}
 
+	if rrset != nil && rrset.Proxied != nil {
+		fmt.Printf("  proxied    : %v\n", *rrset.Proxied)
+	}
+
 	if rrset == nil {
-		fmt.Printf("  status     : record does not exist — would CREATE with value=%s\n", currentIP)
+		fmt.Printf("  status     : record does not exist - would CREATE with value=%s\n", currentIP)
 	} else if currentRecordValue == currentIP.String() {
-		fmt.Printf("  status     : record exists with correct value=%s — no change needed\n", currentRecordValue)
+		fmt.Printf("  status     : record exists with correct value=%s - no change needed\n", currentRecordValue)
 	} else {
-		fmt.Printf("  status     : record exists with value=%s — would UPDATE to %s\n", currentRecordValue, currentIP)
+		fmt.Printf("  status     : record exists with value=%s - would UPDATE to %s\n", currentRecordValue, currentIP)
 	}
 
 	fmt.Println("=== test passed ===")
 	return nil
 }
 
+// checkApex refuses to work on the apex record of a zone.
+func (u *Updater) checkApex() error {
+	record := strings.TrimRight(u.prov.Record, ".")
+	zone := strings.TrimRight(u.prov.Zone, ".")
+	if zone != "" && strings.EqualFold(record, zone) {
+		return fmt.Errorf("refusing to operate on zone apex record %q - use a subdomain instead (e.g. \"home.%s\")", u.prov.Record, u.prov.Zone)
+	}
+	return nil
+}
+
+// resolveZone returns the zone of the provider, either from the cached zone
+// ID or by looking it up. A freshly resolved zone is written back to the
+// configuration.
+func (u *Updater) resolveZone(ctx context.Context) (*dns.Zone, error) {
+	if u.prov.ZoneID != "" {
+		return &dns.Zone{ID: dns.ZoneID(u.prov.ZoneID), Name: u.prov.Zone}, nil
+	}
+
+	resolved, err := u.dnsClient.FindZoneByRecord(ctx, u.prov.Record)
+	if err != nil || resolved == nil {
+		resolved, err = u.dnsClient.FindZone(ctx, u.prov.Zone)
+		if err != nil {
+			return nil, err
+		}
+	} else if u.prov.Zone != "" && !strings.EqualFold(resolved.Name, u.prov.Zone) {
+		// Suffix match disagrees with the configured zone - fall back to the explicit one.
+		resolved, err = u.dnsClient.FindZone(ctx, u.prov.Zone)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Only persist the config if the resolved zone is actually new.
+	if u.prov.ZoneID != string(resolved.ID) || !strings.EqualFold(u.prov.Zone, resolved.Name) {
+		u.prov.ZoneID = string(resolved.ID)
+		u.prov.Zone = resolved.Name
+		if err := u.cfg.SetZone(u.prov.Key, u.prov.ZoneID, u.prov.Zone); err != nil {
+			logger.Warn("failed to save resolved zone_id: %v", err)
+		}
+	}
+	logger.Debug("[%s] resolved zone %q => id=%s", u.prov.Key, u.prov.Zone, u.prov.ZoneID)
+
+	return resolved, nil
+}
+
 func (u *Updater) detectIP(ctx context.Context) (net.IP, error) {
 	var currentIP net.IP
 	var err error
 
-	switch u.cfg.RecordType {
+	switch u.prov.RecordType {
 	case "A":
 		currentIP, err = u.ipDetector.DetectIPv4(ctx)
 	case "AAAA":
 		currentIP, err = u.ipDetector.DetectIPv6(ctx)
 	default:
-		return nil, fmt.Errorf("unsupported record_type: %s", u.cfg.RecordType)
+		return nil, fmt.Errorf("unsupported record_type: %s", u.prov.RecordType)
 	}
 
 	if err != nil {
@@ -239,7 +302,7 @@ func (u *Updater) detectIP(ctx context.Context) (net.IP, error) {
 
 	if !u.cfg.AllowPrivateIP && config.IsPrivateIP(currentIP) {
 		return nil, fmt.Errorf(
-			"detected IP %s is a private/RFC1918 address — if this is intentional, set allow_private_ip=true in config",
+			"detected IP %s is a private/RFC1918 address - if this is intentional, set allow_private_ip=true in config",
 			currentIP,
 		)
 	}

@@ -10,9 +10,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bytes-commerce/bytes-dns/internal/cloudflare"
 	"github.com/bytes-commerce/bytes-dns/internal/config"
 	"github.com/bytes-commerce/bytes-dns/internal/dns"
 	"github.com/bytes-commerce/bytes-dns/internal/installer"
+	"github.com/bytes-commerce/bytes-dns/internal/ip"
 	"github.com/bytes-commerce/bytes-dns/internal/logger"
 	"github.com/bytes-commerce/bytes-dns/internal/selfupdate"
 	"github.com/bytes-commerce/bytes-dns/internal/state"
@@ -25,15 +27,15 @@ var (
 	BuildDate = "unknown"
 )
 
-const usage = `bytes-dns - Dynamic DNS updater for Hetzner DNS
+const usage = `bytes-dns - Dynamic DNS updater for Hetzner DNS and Cloudflare
 
 Usage:
   bytes-dns <command> [flags]
 
 Commands:
-  run        Detect public IP and update the configured DNS record
+  run        Detect public IP and update the configured DNS record(s)
   test       Validate config, detect IP, resolve zone, and preview changes
-  status     Show current config, cached state, and systemd timer status
+  status     Show current config, state, and systemd timer status
   setup      Interactive configuration (API Key, Domain, Records)
   install    Install systemd service and timer units
   uninstall  Remove systemd units and binary
@@ -44,7 +46,7 @@ Flags (for 'run'):
   --force     Force DNS update even if cached IP matches
   --once      Run once and exit (default behaviour; alias for clarity)
   --config    Path to config file (default: ~/.bytes-dns/config.json)
-  --dry-run   Preview changes without writing to Hetzner DNS
+  --dry-run   Preview changes without writing to the DNS provider
 
 Global flags:
   --help, -h  Show this help text
@@ -117,35 +119,59 @@ func cmdRun(args []string) {
 		cfg.DryRun = true
 	}
 	if cfg.DryRun {
-		logger.Info("dry-run mode is ACTIVE — no DNS writes will be performed")
+		logger.Info("dry-run mode is ACTIVE - no DNS writes will be performed")
 	}
 
 	logger.SetLevel(logger.ParseLevel(cfg.LogLevel))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	u := updater.New(cfg, sm)
-	result, err := u.Run(ctx, force)
-	if err != nil {
-		logger.Error("%v", err)
+	providers := cfg.ProviderConfigs()
+	if len(providers) == 0 {
+		logger.Error("no DNS provider configured - set api_token and/or cloudflare.api_token in the config")
 		os.Exit(1)
 	}
 
-	switch result.Action {
-	case updater.ActionNoChange:
-		logger.Info("done - no change (ip=%s)", result.PublicIP)
-	case updater.ActionUpdated:
-		if result.DryRun {
-			logger.Info("done — [dry-run] would update to ip=%s", result.PublicIP)
-		} else {
-			logger.Info("done — updated dns record to ip=%s", result.PublicIP)
+	// The detector is shared so the public IP is only looked up once.
+	detector := ip.NewWithSources(cfg.IPSources())
+
+	for _, prov := range providers {
+		client, err := updater.NewClientForProvider(prov)
+		if err != nil {
+			logger.Error("%v", err)
+			os.Exit(1)
 		}
-	case updater.ActionCreated:
-		if result.DryRun {
-			logger.Info("done — [dry-run] would create record with ip=%s", result.PublicIP)
-		} else {
-			logger.Info("done — created dns record with ip=%s", result.PublicIP)
+
+		u := updater.NewForProvider(updater.Options{
+			Config:   cfg,
+			State:    sm,
+			Provider: prov,
+			Client:   client,
+			Detector: detector,
+		})
+
+		result, err := u.Run(ctx, force)
+		if err != nil {
+			logger.Error("[%s] %v", prov.Key, err)
+			os.Exit(1)
+		}
+
+		switch result.Action {
+		case updater.ActionNoChange:
+			logger.Info("done [%s] - no change (ip=%s)", prov.Key, result.PublicIP)
+		case updater.ActionUpdated:
+			if result.DryRun {
+				logger.Info("done [%s] - [dry-run] would update to ip=%s", prov.Key, result.PublicIP)
+			} else {
+				logger.Info("done [%s] - updated dns record to ip=%s", prov.Key, result.PublicIP)
+			}
+		case updater.ActionCreated:
+			if result.DryRun {
+				logger.Info("done [%s] - [dry-run] would create record with ip=%s", prov.Key, result.PublicIP)
+			} else {
+				logger.Info("done [%s] - created dns record with ip=%s", prov.Key, result.PublicIP)
+			}
 		}
 	}
 }
@@ -161,13 +187,36 @@ func cmdTest(args []string) {
 	cfg, sm := mustLoadConfig(configPath)
 	logger.SetLevel(logger.LevelDebug)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	u := updater.New(cfg, sm)
-	if err := u.Test(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+	providers := cfg.ProviderConfigs()
+	if len(providers) == 0 {
+		fmt.Fprintln(os.Stderr, "ERROR: no DNS provider configured")
 		os.Exit(1)
+	}
+
+	detector := ip.NewWithSources(cfg.IPSources())
+
+	for _, prov := range providers {
+		client, err := updater.NewClientForProvider(prov)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+			os.Exit(1)
+		}
+
+		u := updater.NewForProvider(updater.Options{
+			Config:   cfg,
+			State:    sm,
+			Provider: prov,
+			Client:   client,
+			Detector: detector,
+		})
+
+		if err := u.Test(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR [%s]: %v\n", prov.Key, err)
+			os.Exit(1)
+		}
 	}
 }
 
@@ -195,8 +244,14 @@ func cmdStatus(args []string) {
 		os.Exit(1)
 	}
 
-	dir := filepath.Dir(resolvedPath)
-	sm := state.New(state.DefaultStatePath(dir))
+	// The state is always kept next to the default config directory, no
+	// matter which config file is read.
+	stateDir, err := config.ConfigDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+		os.Exit(1)
+	}
+	sm := state.New(state.DefaultStatePath(stateDir))
 	st, err := sm.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "WARN: cannot load state: %v\n", err)
@@ -212,7 +267,50 @@ func cmdStatus(args []string) {
 	fmt.Printf("  dry_run        : %v\n", cfg.DryRun)
 	fmt.Printf("  log level      : %s\n", cfg.LogLevel)
 
-	if st != nil {
+	providers := cfg.ProviderConfigs()
+	fmt.Printf("  providers      : %d\n", len(providers))
+	for _, prov := range providers {
+		zoneID := prov.ZoneID
+		if zoneID == "" {
+			zoneID = "(unresolved)"
+		}
+		fmt.Printf("    - %s\n", prov.Key)
+		fmt.Printf("        zone     : %s (id: %s)\n", prov.Zone, zoneID)
+		fmt.Printf("        record   : %s %s\n", prov.RecordType, prov.Record)
+		fmt.Printf("        ttl      : %d\n", prov.TTL)
+		if prov.Key == config.ProviderCloudflare {
+			proxied := true
+			if prov.Proxied != nil {
+				proxied = *prov.Proxied
+			}
+			fmt.Printf("        proxied  : %v (new records only)\n", proxied)
+		}
+		if st != nil {
+			if lastErr := sm.LastErrorFor(st, prov.Key); lastErr != "" {
+				fmt.Printf("        last error: %s\n", truncateError(lastErr))
+			}
+			if lastIP := sm.LastIPFor(st, prov.Key); lastIP != "" {
+				fmt.Printf("        last IP  : %s\n", lastIP)
+			} else {
+				fmt.Printf("        last IP  : (not yet cached)\n")
+			}
+			if lastUpdated := sm.LastUpdatedFor(st, prov.Key); !lastUpdated.IsZero() {
+				fmt.Printf("        updated  : %s\n", lastUpdated.UTC().Format(time.RFC3339))
+			}
+		}
+	}
+
+	// The flat state fields belong to the primary provider, so they are only
+	// meaningful when it is configured.
+	hetznerConfigured := false
+	for _, prov := range providers {
+		if prov.Key == config.ProviderHetzner {
+			hetznerConfigured = true
+			break
+		}
+	}
+
+	if st != nil && hetznerConfigured {
 		if st.LastIP != "" {
 			fmt.Printf("  last known IP  : %s\n", st.LastIP)
 		} else {
@@ -282,11 +380,14 @@ func cmdSetup(args []string) {
 
 	fmt.Println("=== bytes-dns setup ===")
 
+	// --- Hetzner ---
 	if cfg.APIToken == "" {
-		fmt.Print("Hetzner API Token: ")
-		_, _ = fmt.Scanln(&cfg.APIToken)
+		fmt.Print("Hetzner API Token (leave empty to skip Hetzner): ")
+		var token string
+		_, _ = fmt.Scanln(&token)
+		cfg.APIToken = token
 	} else {
-		fmt.Printf("Hetzner API Token (current: %s...): ", cfg.APIToken[:5])
+		fmt.Printf("Hetzner API Token (current: %s...): ", truncate(cfg.APIToken, 5))
 		var newToken string
 		_, _ = fmt.Scanln(&newToken)
 		if newToken != "" {
@@ -294,11 +395,12 @@ func cmdSetup(args []string) {
 		}
 	}
 
-	dnsClient := dns.New(cfg.APIToken)
-	ctx := context.Background()
-
 	fmt.Print("Target Domain (e.g. home.example.com): ")
-	_, _ = fmt.Scanln(&cfg.Record)
+	var record string
+	_, _ = fmt.Scanln(&record)
+	if record != "" {
+		cfg.Record = record
+	}
 
 	fmt.Print("Zone Name (e.g. example.com): ")
 	var inputZone string
@@ -312,41 +414,22 @@ func cmdSetup(args []string) {
 		_, _ = fmt.Scanln(&cfg.Zone)
 	}
 
-	zone, err := dnsClient.FindZoneByRecord(ctx, cfg.Record)
-	if err != nil {
-		zone, err = dnsClient.FindZone(ctx, cfg.Zone)
-	}
+	ctx := context.Background()
 
-	if err != nil {
-		fmt.Printf("Zone %q not found. Do you want to create it? (y/n): ", cfg.Zone)
-		var confirm string
-		_, _ = fmt.Scanln(&confirm)
-		if strings.ToLower(confirm) == "y" {
-			if !strings.Contains(cfg.Zone, ".") {
-				fmt.Fprintf(os.Stderr, "Error: %q does not look like a valid zone name (must contain at least one dot).\n", cfg.Zone)
-				os.Exit(1)
-			}
-			var err2 error
-			zone, err2 = dnsClient.CreateZone(ctx, cfg.Zone, cfg.TTL)
-			if err2 != nil {
-				fmt.Fprintf(os.Stderr, "Error creating zone: %v\n", err2)
-				os.Exit(1)
-			}
-			fmt.Printf("Zone %q created successfully (ID: %d).\n", zone.Name, zone.ID)
-		} else {
-			fmt.Println("Setup cancelled.")
+	if cfg.APIToken != "" {
+		if err := setupHetznerZone(ctx, cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
+	} else {
+		fmt.Println("Skipping Hetzner zone lookup - no Hetzner API token configured.")
 	}
 
-	if zone == nil {
-		fmt.Fprintln(os.Stderr, "Error: No zone resolved.")
+	// --- Cloudflare ---
+	if err := setupCloudflare(ctx, cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-
-	cfg.Zone = zone.Name
-	cfg.ZoneID = fmt.Sprintf("%d", zone.ID)
-	fmt.Printf("Using Zone: %s (ID: %s)\n", zone.Name, cfg.ZoneID)
 
 	fmt.Printf("Record Type (A or AAAA) [current: %s]: ", cfg.RecordType)
 	var inputType string
@@ -366,6 +449,126 @@ func cmdSetup(args []string) {
 
 	fmt.Printf("Config saved to %s\n", configPath)
 	fmt.Println("You can now run 'bytes-dns test' to verify the connection.")
+}
+
+// setupHetznerZone resolves the Hetzner zone and offers to create it when it
+// does not exist yet.
+func setupHetznerZone(ctx context.Context, cfg *config.Config) error {
+	dnsClient := dns.New(cfg.APIToken)
+
+	zone, err := dnsClient.FindZoneByRecord(ctx, cfg.Record)
+	if err != nil {
+		zone, err = dnsClient.FindZone(ctx, cfg.Zone)
+	}
+
+	if err != nil {
+		fmt.Printf("Zone %q not found. Do you want to create it? (y/n): ", cfg.Zone)
+		var confirm string
+		_, _ = fmt.Scanln(&confirm)
+		if !strings.EqualFold(confirm, "y") {
+			return fmt.Errorf("setup cancelled: Hetzner zone %q not found", cfg.Zone)
+		}
+		if !strings.Contains(cfg.Zone, ".") {
+			return fmt.Errorf("%q does not look like a valid zone name (must contain at least one dot)", cfg.Zone)
+		}
+		zone, err = dnsClient.CreateZone(ctx, cfg.Zone, cfg.TTL)
+		if err != nil {
+			return fmt.Errorf("creating zone: %w", err)
+		}
+		fmt.Printf("Zone %q created successfully (ID: %s).\n", zone.Name, zone.ID)
+	}
+
+	if zone == nil {
+		return fmt.Errorf("no zone resolved")
+	}
+
+	cfg.Zone = zone.Name
+	cfg.ZoneID = string(zone.ID)
+	fmt.Printf("Using Zone: %s (ID: %s)\n", zone.Name, cfg.ZoneID)
+
+	return nil
+}
+
+// setupCloudflare asks for the optional Cloudflare settings and validates
+// them against the Cloudflare API.
+func setupCloudflare(ctx context.Context, cfg *config.Config) error {
+	if cfg.Cloudflare != nil && cfg.Cloudflare.APIToken != "" {
+		fmt.Printf("Cloudflare API Token (current: %s...): ", truncate(cfg.Cloudflare.APIToken, 5))
+		var token string
+		_, _ = fmt.Scanln(&token)
+		if token != "" {
+			cfg.Cloudflare.APIToken = token
+		}
+	} else {
+		fmt.Print("Configure Cloudflare as well? (y/n): ")
+		var answer string
+		_, _ = fmt.Scanln(&answer)
+		if !strings.EqualFold(answer, "y") {
+			return nil
+		}
+
+		fmt.Print("Cloudflare API Token (needs Zone:Read + Zone:DNS:Edit): ")
+		var token string
+		_, _ = fmt.Scanln(&token)
+		if token == "" {
+			fmt.Println("No Cloudflare API token given - skipping Cloudflare.")
+			return nil
+		}
+		cfg.Cloudflare = &config.CloudflareConfig{APIToken: token}
+	}
+
+	if cfg.Cloudflare == nil {
+		return nil
+	}
+
+	cf := cfg.Cloudflare
+
+	fmt.Printf("Cloudflare Zone (e.g. example.com) [current: %s]: ", defaultValue(cf.Zone, cfg.Zone))
+	var zoneName string
+	_, _ = fmt.Scanln(&zoneName)
+	if zoneName != "" {
+		cf.Zone = zoneName
+	}
+	if cf.Zone == "" {
+		cf.Zone = cfg.Zone
+	}
+
+	fmt.Printf("Cloudflare Record (e.g. home.example.com) [current: %s]: ", defaultValue(cf.Record, cfg.Record))
+	var recordName string
+	_, _ = fmt.Scanln(&recordName)
+	if recordName != "" {
+		cf.Record = recordName
+	}
+	if cf.Record == "" {
+		cf.Record = cfg.Record
+	}
+
+	cfClient := cloudflare.New(cloudflare.Options{APIToken: cf.APIToken, Zone: cf.Zone})
+	zone, err := cfClient.FindZone(ctx, cf.Zone)
+	if err != nil {
+		return fmt.Errorf("zone %q not found in Cloudflare (Cloudflare zones cannot be created by bytes-dns): %w", cf.Zone, err)
+	}
+	cf.Zone = zone.Name
+	cf.ZoneID = string(zone.ID)
+	fmt.Printf("Using Cloudflare Zone: %s (ID: %s)\n", cf.Zone, cf.ZoneID)
+
+	proxied := true
+	if cf.Proxied != nil {
+		proxied = *cf.Proxied
+	}
+	fmt.Printf("Proxy new records through Cloudflare? (Y/n) [current: %v]: ", proxied)
+	var proxyAnswer string
+	_, _ = fmt.Scanln(&proxyAnswer)
+	switch strings.ToLower(strings.TrimSpace(proxyAnswer)) {
+	case "n", "no":
+		value := false
+		cf.Proxied = &value
+	case "y", "yes":
+		value := true
+		cf.Proxied = &value
+	}
+
+	return nil
 }
 
 func cmdInstall() {
@@ -410,12 +613,12 @@ func cmdUpdate(args []string) {
 		force bool
 	)
 	for _, a := range args {
-		switch a {
-		case "--check":
+		switch {
+		case a == "--check":
 			check = true
-		case "--force":
+		case a == "--force":
 			force = true
-		case "--help", "-h":
+		case a == "--help" || a == "-h":
 			fmt.Print(`bytes-dns update - fetch and apply the latest release
 
 Usage:
@@ -557,4 +760,29 @@ func mustLoadConfig(path string) (*config.Config, *state.Manager) {
 
 	sm := state.New(state.DefaultStatePath(dir))
 	return cfg, sm
+}
+
+// truncate shortens a secret for display purposes.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+// truncateError shortens a stored error message for display.
+func truncateError(s string) string {
+	const maxLen = 120
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "…"
+}
+
+// defaultValue returns value or fallback when value is empty.
+func defaultValue(value, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
 }

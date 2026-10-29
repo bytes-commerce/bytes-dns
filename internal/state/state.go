@@ -9,11 +9,34 @@ import (
 	"time"
 )
 
+// legacyProvider is the provider the flat state fields belong to. They are
+// kept for backwards compatibility with state files written before the
+// provider aware state was introduced.
+const legacyProvider = "hetzner"
+
 type State struct {
+	// The flat fields mirror the state of the primary provider.
 	LastIP       string    `json:"last_ip"`
 	LastRecordID string    `json:"last_record_id"`
 	LastUpdated  time.Time `json:"last_updated"`
 	LastChecked  time.Time `json:"last_checked"`
+
+	// Providers holds the per provider state. Every provider keeps its own
+	// last known IP so that one provider never suppresses the update of
+	// another.
+	Providers map[string]ProviderState `json:"providers,omitempty"`
+}
+
+// ProviderState is the state of a single provider.
+type ProviderState struct {
+	LastIP       string    `json:"last_ip"`
+	LastRecordID string    `json:"last_record_id"`
+	LastUpdated  time.Time `json:"last_updated"`
+	// LastError holds the message of the last failed run of the provider.
+	// It is cleared as soon as a run of the provider completes without an
+	// error.
+	LastError   string     `json:"last_error,omitempty"`
+	LastErrorAt *time.Time `json:"last_error_at,omitempty"`
 }
 
 type Manager struct {
@@ -51,7 +74,26 @@ func (m *Manager) Load() (*State, error) {
 		}
 		return &State{}, nil
 	}
+
+	s.migrateLegacy()
+
 	return &s, nil
+}
+
+// migrateLegacy moves a flat state file into the provider map so an
+// existing installation keeps its "IP unchanged" shortcut after the update.
+func (s *State) migrateLegacy() {
+	if len(s.Providers) > 0 || s.LastIP == "" {
+		return
+	}
+
+	s.Providers = map[string]ProviderState{
+		legacyProvider: {
+			LastIP:       s.LastIP,
+			LastRecordID: s.LastRecordID,
+			LastUpdated:  s.LastUpdated,
+		},
+	}
 }
 
 func (m *Manager) Save(s *State) error {
@@ -78,14 +120,126 @@ func (m *Manager) Save(s *State) error {
 }
 
 func (m *Manager) MarkChecked(s *State) error {
+	return m.MarkCheckedFor(s, legacyProvider)
+}
+
+// MarkCheckedFor records that the provider was checked without any change.
+func (m *Manager) MarkCheckedFor(s *State, provider string) error {
 	s.LastChecked = time.Now().UTC()
+
+	s.ensureProviders()
+	current := s.Providers[provider]
+	s.Providers[provider] = ProviderState{
+		LastIP:       current.LastIP,
+		LastRecordID: current.LastRecordID,
+		LastUpdated:  current.LastUpdated,
+	}
+
 	return m.Save(s)
 }
 
 func (m *Manager) MarkUpdated(s *State, ip, recordID string) error {
-	s.LastIP = ip
-	s.LastRecordID = recordID
-	s.LastUpdated = time.Now().UTC()
-	s.LastChecked = s.LastUpdated
+	return m.MarkUpdatedFor(s, legacyProvider, ip, recordID)
+}
+
+// MarkUpdatedFor records a successful update of the given provider.
+func (m *Manager) MarkUpdatedFor(s *State, provider, ip, recordID string) error {
+	now := time.Now().UTC()
+
+	// The flat fields always mirror the primary provider. Writing them for
+	// any other provider would make the legacy fallback of LastIPFor report
+	// a foreign address for the primary provider.
+	if provider == legacyProvider {
+		s.LastIP = ip
+		s.LastRecordID = recordID
+		s.LastUpdated = now
+	}
+	s.LastChecked = now
+
+	s.ensureProviders()
+	s.Providers[provider] = ProviderState{
+		LastIP:       ip,
+		LastRecordID: recordID,
+		LastUpdated:  now,
+	}
+
 	return m.Save(s)
+}
+
+// MarkErrorFor records a failed run of the given provider. The last known IP
+// stays untouched so the next run still performs the update.
+func (m *Manager) MarkErrorFor(s *State, provider string, cause error) error {
+	if cause == nil {
+		return nil
+	}
+
+	now := time.Now().UTC()
+
+	s.ensureProviders()
+	current := s.Providers[provider]
+	current.LastError = cause.Error()
+	at := now
+	current.LastErrorAt = &at
+	s.Providers[provider] = current
+
+	return m.Save(s)
+}
+
+// LastErrorFor returns the message of the last failed run of the given
+// provider.
+func (m *Manager) LastErrorFor(s *State, provider string) string {
+	if s == nil {
+		return ""
+	}
+	return s.Providers[provider].LastError
+}
+
+// LastIPFor returns the last known IP of the given provider.
+func (m *Manager) LastIPFor(s *State, provider string) string {
+	if s == nil {
+		return ""
+	}
+	if st, ok := s.Providers[provider]; ok {
+		return st.LastIP
+	}
+	if provider == legacyProvider {
+		return s.LastIP
+	}
+	return ""
+}
+
+// LastUpdatedFor returns the time of the last successful update of the
+// given provider.
+func (m *Manager) LastUpdatedFor(s *State, provider string) time.Time {
+	if s == nil {
+		return time.Time{}
+	}
+	if st, ok := s.Providers[provider]; ok {
+		return st.LastUpdated
+	}
+	if provider == legacyProvider {
+		return s.LastUpdated
+	}
+	return time.Time{}
+}
+
+// LastRecordIDFor returns the record ID of the last update of the given
+// provider.
+func (m *Manager) LastRecordIDFor(s *State, provider string) string {
+	if s == nil {
+		return ""
+	}
+	if st, ok := s.Providers[provider]; ok {
+		return st.LastRecordID
+	}
+	if provider == legacyProvider {
+		return s.LastRecordID
+	}
+	return ""
+}
+
+func (s *State) ensureProviders() {
+	if s.Providers == nil {
+		s.Providers = map[string]ProviderState{}
+	}
 }

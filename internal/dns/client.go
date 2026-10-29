@@ -1,23 +1,21 @@
 package dns
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
+
+	"github.com/bytes-commerce/bytes-dns/internal/httpx"
 )
 
 const (
 	productionAPIBase = "https://api.hetzner.cloud/v1"
 	requestTimeout    = 15 * time.Second
-
-	maxRetries       = 3
-	retryBackoffBase = 250 * time.Millisecond
 
 	// actionPollInterval is how often we poll the Hetzner action
 	// status endpoint after firing an rrset action.
@@ -28,22 +26,27 @@ const (
 )
 
 type Client struct {
-	token      string
-	apiBase    string
-	httpClient *http.Client
+	apiBase string
+	http    *httpx.Client
 }
 
 func New(token string) *Client {
-	return NewWithBaseURL(token, productionAPIBase)
+	base := os.Getenv("HETZNER_API_BASE")
+	if base == "" {
+		base = productionAPIBase
+	}
+	return NewWithBaseURL(token, base)
 }
 
 func NewWithBaseURL(token, baseURL string) *Client {
+	http := httpx.NewClient(requestTimeout)
+	http.SetHeader("Authorization", "Bearer "+token)
+	http.SetHeader("Accept", "application/json")
+	http.SetHeader("User-Agent", "bytes-dns/1.0 (+https://github.com/bytes-commerce/bytes-dns)")
+
 	return &Client{
-		token:   token,
 		apiBase: baseURL,
-		httpClient: &http.Client{
-			Timeout: requestTimeout,
-		},
+		http:    http,
 	}
 }
 
@@ -58,9 +61,10 @@ func (c *Client) FindZone(ctx context.Context, zoneName string) (*Zone, error) {
 		return nil, fmt.Errorf("listing zones: %w", err)
 	}
 
-	for _, z := range result.Zones {
+	for i := range result.Zones {
+		z := &result.Zones[i]
 		if strings.EqualFold(z.Name, zoneName) {
-			return &z, nil
+			return z, nil
 		}
 	}
 
@@ -131,15 +135,23 @@ func (c *Client) ListRRSets(ctx context.Context, zoneID string, name string, rec
 	return result.RRSets, nil
 }
 
-func (c *Client) FindRRSet(ctx context.Context, zoneID, name, recordType string) (*RRSet, error) {
-	rrsets, err := c.ListRRSets(ctx, zoneID, name, recordType)
+// FindRRSet looks up a record set. The record is addressed by its fully
+// qualified name; Hetzner stores it relative to the zone, so the name is
+// converted into a label first.
+func (c *Client) FindRRSet(ctx context.Context, zone *Zone, fqdn, recordType string) (*RRSet, error) {
+	label, err := RecordLabel(fqdn, zone.Name)
+	if err != nil {
+		return nil, err
+	}
+
+	rrsets, err := c.ListRRSets(ctx, string(zone.ID), label, recordType)
 	if err != nil {
 		return nil, err
 	}
 
 	for i := range rrsets {
 		r := &rrsets[i]
-		if strings.EqualFold(r.Type, recordType) && strings.EqualFold(r.Name, name) {
+		if strings.EqualFold(r.Type, recordType) && strings.EqualFold(r.Name, label) {
 			return r, nil
 		}
 	}
@@ -147,7 +159,7 @@ func (c *Client) FindRRSet(ctx context.Context, zoneID, name, recordType string)
 	return nil, nil
 }
 
-func (c *Client) UpdateRRSet(ctx context.Context, zoneID string, rrset *RRSet, newValue string) (*RRSet, error) {
+func (c *Client) UpdateRRSet(ctx context.Context, zone *Zone, rrset *RRSet, newValue string) (*RRSet, error) {
 	// Hetzner migrated the rrset update from PUT to an action endpoint
 	// (POST /zones/{id}/rrsets/{name}/{type}/actions/set_records) in
 	// late 2025. The old PUT endpoint returns 422 with
@@ -162,25 +174,31 @@ func (c *Client) UpdateRRSet(ctx context.Context, zoneID string, rrset *RRSet, n
 	}
 
 	endpoint := fmt.Sprintf("%s/zones/%s/rrsets/%s/%s/actions/set_records",
-		c.apiBase, url.PathEscape(zoneID), url.PathEscape(rrset.Name), url.PathEscape(rrset.Type))
+		c.apiBase, url.PathEscape(string(zone.ID)), url.PathEscape(rrset.Name), url.PathEscape(rrset.Type))
 
 	var resp actionResponse
 	if err := c.post(ctx, endpoint, body, &resp); err != nil {
-		return nil, fmt.Errorf("updating rrset %s (%s) in zone %s: %w", rrset.Name, rrset.Type, zoneID, err)
+		return nil, fmt.Errorf("updating rrset %s (%s) in zone %s: %w", rrset.Name, rrset.Type, zone.ID, err)
 	}
 
 	if err := c.waitForAction(ctx, resp.Action.ID); err != nil {
-		return nil, fmt.Errorf("waiting for set_records action on %s (%s) in zone %s: %w", rrset.Name, rrset.Type, zoneID, err)
+		return nil, fmt.Errorf("waiting for set_records action on %s (%s) in zone %s: %w", rrset.Name, rrset.Type, zone.ID, err)
 	}
 
 	// Return a copy so we don't mutate the caller's RRSet.
 	updated := *rrset
+	updated.Zone = zone.ID
 	updated.Records = make([]RecordValue, len(body.Records))
 	copy(updated.Records, body.Records)
 	return &updated, nil
 }
 
-func (c *Client) CreateRRSet(ctx context.Context, zoneID, name, recordType, value string, ttl int) (*RRSet, error) {
+func (c *Client) CreateRRSet(ctx context.Context, zone *Zone, fqdn, recordType, value string, ttl int, _ *CreateOptions) (*RRSet, error) {
+	label, err := RecordLabel(fqdn, zone.Name)
+	if err != nil {
+		return nil, err
+	}
+
 	// Hetzner's rrset create flow also uses the action endpoint:
 	// POST /zones/{id}/rrsets/{name}/{type}/actions/set_records. The
 	// set_records action creates the rrset if it doesn't exist.
@@ -195,36 +213,46 @@ func (c *Client) CreateRRSet(ctx context.Context, zoneID, name, recordType, valu
 	}
 
 	endpoint := fmt.Sprintf("%s/zones/%s/rrsets/%s/%s/actions/set_records",
-		c.apiBase, url.PathEscape(zoneID), url.PathEscape(name), url.PathEscape(recordType))
+		c.apiBase, url.PathEscape(string(zone.ID)), url.PathEscape(label), url.PathEscape(recordType))
 
 	var resp actionResponse
 	if err := c.post(ctx, endpoint, body, &resp); err != nil {
-		return nil, fmt.Errorf("creating %s record %q in zone %s: %w", recordType, name, zoneID, err)
+		return nil, fmt.Errorf("creating %s record %q in zone %s: %w", recordType, fqdn, zone.ID, err)
 	}
 
 	if err := c.waitForAction(ctx, resp.Action.ID); err != nil {
-		return nil, fmt.Errorf("waiting for set_records action on %s (%s) in zone %s: %w", name, recordType, zoneID, err)
+		return nil, fmt.Errorf("waiting for set_records action on %s (%s) in zone %s: %w", label, recordType, zone.ID, err)
 	}
 
 	return &RRSet{
-		Name:    name,
+		Name:    label,
 		Type:    recordType,
 		TTL:     ttl,
-		Zone:    parseZoneID(zoneID),
+		Zone:    zone.ID,
 		Records: body.Records,
 	}, nil
 }
 
-// parseZoneID converts a zoneID string to an int. Returns 0 on parse failure.
-func parseZoneID(s string) int {
-	var n int
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return 0
-		}
-		n = n*10 + int(c-'0')
+// RecordLabel converts a fully qualified record name into the label Hetzner
+// stores it under, e.g. "home.example.com" becomes "home" for the zone
+// "example.com".
+func RecordLabel(fqdn, zoneName string) (string, error) {
+	fqdn = strings.TrimRight(strings.TrimSpace(fqdn), ".")
+	zoneName = strings.TrimRight(strings.TrimSpace(zoneName), ".")
+
+	if fqdn == "" || zoneName == "" {
+		return "", fmt.Errorf("record name and zone name are required")
 	}
-	return n
+	if strings.EqualFold(fqdn, zoneName) {
+		return "", fmt.Errorf("refusing to operate on the zone apex record %q - use a subdomain instead (e.g. \"home.%s\")", fqdn, zoneName)
+	}
+
+	suffix := "." + zoneName
+	if !strings.HasSuffix(strings.ToLower(fqdn), strings.ToLower(suffix)) {
+		return "", fmt.Errorf("record %q is not within zone %q", fqdn, zoneName)
+	}
+
+	return fqdn[:len(fqdn)-len(suffix)], nil
 }
 
 // waitForAction polls the Hetzner /actions/{id} endpoint until the
@@ -257,7 +285,7 @@ func (c *Client) waitForAction(ctx context.Context, id int) error {
 		case "running":
 			// fall through to sleep + retry
 		default:
-			// Unknown status — treat as running.
+			// Unknown status - treat as running.
 		}
 
 		select {
@@ -269,145 +297,37 @@ func (c *Client) waitForAction(ctx context.Context, id int) error {
 }
 
 func (c *Client) get(ctx context.Context, endpoint string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return fmt.Errorf("building request: %w", err)
+	if err := c.http.GetJSON(ctx, endpoint, out); err != nil {
+		return c.decorate(err, endpoint)
 	}
-	c.setHeaders(req)
-	return c.doWithRetry(req, out)
-}
-
-func (c *Client) post(ctx context.Context, endpoint string, body any, out any) error {
-	return c.sendJSON(ctx, http.MethodPost, endpoint, body, out)
-}
-
-func (c *Client) sendJSON(ctx context.Context, method, endpoint string, body, out any) error {
-	encoded, err := json.Marshal(body)
-	if err != nil {
-		return fmt.Errorf("marshalling request body: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(encoded))
-	if err != nil {
-		return fmt.Errorf("building request: %w", err)
-	}
-	c.setHeaders(req)
-	req.Header.Set("Content-Type", "application/json")
-	req.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader(encoded)), nil
-	}
-
-	return c.doWithRetry(req, out)
-}
-
-func (c *Client) setHeaders(req *http.Request) {
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "bytes-dns/1.0 (+https://github.com/bytes-commerce/bytes-dns)")
-}
-
-// doWithRetry executes the HTTP request with a retry policy.
-// Retries on HTTP 5xx, 429, and network errors. Does not retry on 4xx.
-func (c *Client) doWithRetry(req *http.Request, out any) error {
-	var lastErr error
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		if attempt > 0 {
-			backoff := retryBackoffBase * (1 << (attempt - 1)) // 250ms, 500ms, 1s
-			select {
-			case <-time.After(backoff):
-			case <-req.Context().Done():
-				return fmt.Errorf("retry aborted: %w", req.Context().Err())
-			}
-		}
-
-		// Re-create the request body for retries if needed.
-		var bodyReader io.ReadCloser
-		if req.Body != nil {
-			if req.GetBody == nil {
-				// Caller didn't supply GetBody; can't safely retry.
-				return c.do(req, out)
-			}
-			rc, err := req.GetBody()
-			if err != nil {
-				return fmt.Errorf("retry body clone: %w", err)
-			}
-			bodyReader = rc
-		}
-
-		attemptReq := req
-		if bodyReader != nil {
-			clone := req.Clone(req.Context())
-			clone.Body = bodyReader
-			attemptReq = clone
-		}
-
-		lastErr = c.do(attemptReq, out)
-		if lastErr == nil || !shouldRetry(lastErr) {
-			return lastErr
-		}
-	}
-	return fmt.Errorf("after %d attempts: %w", maxRetries, lastErr)
-}
-
-func shouldRetry(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	switch {
-	case strings.Contains(msg, "HTTP 429"):
-		return true
-	case strings.Contains(msg, "HTTP 5"):
-		return true
-	case strings.Contains(msg, "HTTP request to"):
-		return true // network / connection error
-	default:
-		return false
-	}
-}
-
-func (c *Client) do(req *http.Request, out any) error {
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("HTTP request to %s failed: %w", req.URL.Host, err)
-	}
-	defer resp.Body.Close()
-
-	rawBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return fmt.Errorf("reading response body: %w", err)
-	}
-
-	if resp.StatusCode == http.StatusUnauthorized {
-		return fmt.Errorf("authentication failed (HTTP 401) — check your api_token in config.json")
-	}
-	if resp.StatusCode == http.StatusForbidden {
-		return fmt.Errorf("access denied (HTTP 403) — the API token may lack required permissions")
-	}
-	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("resource not found (HTTP 404) at %s", req.URL.Path)
-	}
-	if resp.StatusCode == http.StatusUnprocessableEntity {
-		return fmt.Errorf("invalid request (HTTP 422): %s", sanitisedBody(rawBody))
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("unexpected HTTP %d from Hetzner DNS API: %s", resp.StatusCode, sanitisedBody(rawBody))
-	}
-
-	if out != nil && len(rawBody) > 0 {
-		if err := json.Unmarshal(rawBody, out); err != nil {
-			return fmt.Errorf("decoding API response: %w (body: %s)", err, sanitisedBody(rawBody))
-		}
-	}
-
 	return nil
 }
 
-func sanitisedBody(b []byte) string {
-	const maxLen = 256
-	s := strings.TrimSpace(string(b))
-	if len(s) > maxLen {
-		return s[:maxLen] + "…"
+func (c *Client) post(ctx context.Context, endpoint string, body any, out any) error {
+	if err := c.http.SendJSON(ctx, http.MethodPost, endpoint, body, out); err != nil {
+		return c.decorate(err, endpoint)
 	}
-	return s
+	return nil
+}
+
+// decorate turns the generic HTTP errors of the shared client into
+// messages that point at the likely cause.
+func (c *Client) decorate(err error, endpoint string) error {
+	var httpErr *httpx.Error
+	if !errors.As(err, &httpErr) {
+		return err
+	}
+
+	switch httpErr.StatusCode {
+	case http.StatusUnauthorized:
+		return fmt.Errorf("authentication failed (HTTP 401) - check your api_token in config.json")
+	case http.StatusForbidden:
+		return fmt.Errorf("access denied (HTTP 403) - the API token may lack required permissions")
+	case http.StatusNotFound:
+		return fmt.Errorf("resource not found (HTTP 404) at %s", endpoint)
+	case http.StatusUnprocessableEntity:
+		return fmt.Errorf("invalid request (HTTP 422): %s", httpErr.Body)
+	default:
+		return fmt.Errorf("unexpected HTTP %d from Hetzner DNS API: %s", httpErr.StatusCode, httpErr.Body)
+	}
 }

@@ -17,6 +17,15 @@ const (
 	DefaultIPSource   = "https://api4.my-ip.io/ip.txt,https://ifconfig.co/ip,https://checkip.amazonaws.com"
 	DefaultLogLevel   = "info"
 	DefaultRecordType = "A"
+
+	// ProviderHetzner and ProviderCloudflare are the keys used to address a
+	// provider in the configuration and in the local state file.
+	ProviderHetzner    = "hetzner"
+	ProviderCloudflare = "cloudflare"
+
+	// CloudflareMinTTL is the smallest TTL Cloudflare accepts for a record
+	// (1 means "automatic").
+	CloudflareMinTTL = 60
 )
 
 type Config struct {
@@ -31,14 +40,69 @@ type Config struct {
 	LogLevel        string `json:"log_level"`
 	AllowPrivateIP  bool   `json:"allow_private_ip"`
 	DryRun          bool   `json:"dry_run"`
+
+	// Cloudflare is optional. When it carries an API token, the record is
+	// synchronised with Cloudflare in addition to the primary provider.
+	Cloudflare *CloudflareConfig `json:"cloudflare,omitempty"`
+
+	// path remembers where the config was loaded from so resolved zone IDs
+	// can be written back to the same file.
+	path string
+}
+
+// CloudflareConfig holds the optional Cloudflare settings.
+type CloudflareConfig struct {
+	// APIToken is a Cloudflare API token with the "Zone:Read" and
+	// "Zone:DNS:Edit" permissions.
+	APIToken string `json:"api_token"`
+	// Zone is the Cloudflare zone, e.g. "example.com". Defaults to the
+	// top level zone.
+	Zone string `json:"zone,omitempty"`
+	// ZoneID is the Cloudflare zone ID. It is looked up once and cached.
+	ZoneID string `json:"zone_id,omitempty"`
+	// Record is the fully qualified record name. Defaults to the top level
+	// record.
+	Record string `json:"record,omitempty"`
+	// TTL overrides the top level TTL. Cloudflare only accepts 1
+	// (automatic) or 60 seconds and above.
+	TTL int `json:"ttl,omitempty"`
+	// Proxied controls whether newly created records are routed through
+	// Cloudflare. Unset means proxied, an explicit false creates a DNS-only
+	// record. Existing records are never changed.
+	Proxied *bool `json:"proxied,omitempty"`
+}
+
+// ProviderConfig is the provider neutral view of a provider configuration.
+type ProviderConfig struct {
+	// Key identifies the provider, e.g. "hetzner" or "cloudflare".
+	Key string
+	// APIToken is the credential used for the provider.
+	APIToken string
+	// Zone is the zone name, e.g. "example.com".
+	Zone string
+	// ZoneID is the cached zone ID. It may be empty.
+	ZoneID string
+	// Record is the fully qualified record name, e.g. "home.example.com".
+	Record string
+	// RecordType is "A" or "AAAA".
+	RecordType string
+	// TTL is the record TTL in seconds.
+	TTL int
+	// Proxied is the Cloudflare proxy setting. It is nil for providers that
+	// do not support it.
+	Proxied *bool
 }
 
 func (c *Config) Save(path string) error {
 	if path == "" {
-		var err error
-		path, err = DefaultConfigPath()
-		if err != nil {
-			return err
+		if c.path != "" {
+			path = c.path
+		} else {
+			var err error
+			path, err = DefaultConfigPath()
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -100,6 +164,7 @@ func Load(path string) (*Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("config file %s contains invalid JSON: %w", path, err)
 	}
+	cfg.path = path
 
 	applyDefaults(&cfg)
 
@@ -147,6 +212,94 @@ func (c *Config) IPSources() []string {
 	return out
 }
 
+// ProviderConfigs returns the providers that are configured and should be
+// synchronised. The primary provider comes first.
+func (c *Config) ProviderConfigs() []ProviderConfig {
+	var out []ProviderConfig
+
+	if strings.TrimSpace(c.APIToken) != "" {
+		out = append(out, ProviderConfig{
+			Key:        ProviderHetzner,
+			APIToken:   c.APIToken,
+			Zone:       c.Zone,
+			ZoneID:     c.ZoneID,
+			Record:     c.Record,
+			RecordType: c.RecordType,
+			TTL:        c.TTL,
+		})
+	}
+
+	if cf := c.Cloudflare; cf != nil && strings.TrimSpace(cf.APIToken) != "" {
+		out = append(out, ProviderConfig{
+			Key:        ProviderCloudflare,
+			APIToken:   cf.APIToken,
+			Zone:       firstNonEmpty(cf.Zone, c.Zone),
+			ZoneID:     cf.ZoneID,
+			Record:     firstNonEmpty(cf.Record, c.Record),
+			RecordType: c.RecordType,
+			TTL:        effectiveTTL(cf.TTL, c.TTL),
+			Proxied:    cf.Proxied,
+		})
+	}
+
+	return out
+}
+
+// PrimaryProvider returns the configuration of the primary (Hetzner)
+// provider. It is used when no explicit provider is given.
+func (c *Config) PrimaryProvider() ProviderConfig {
+	return ProviderConfig{
+		Key:        ProviderHetzner,
+		APIToken:   c.APIToken,
+		Zone:       c.Zone,
+		ZoneID:     c.ZoneID,
+		Record:     c.Record,
+		RecordType: c.RecordType,
+		TTL:        c.TTL,
+	}
+}
+
+// SetZone stores a resolved zone for the given provider and writes the
+// configuration back to disk.
+func (c *Config) SetZone(providerKey, zoneID, zoneName string) error {
+	switch providerKey {
+	case ProviderHetzner:
+		c.ZoneID = zoneID
+		if zoneName != "" {
+			c.Zone = zoneName
+		}
+	case ProviderCloudflare:
+		if c.Cloudflare == nil {
+			return errors.New("cloudflare configuration is missing")
+		}
+		c.Cloudflare.ZoneID = zoneID
+		if zoneName != "" {
+			c.Cloudflare.Zone = zoneName
+		}
+	default:
+		return fmt.Errorf("unknown provider %q", providerKey)
+	}
+
+	return c.Save("")
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// effectiveTTL returns the override when it is set, otherwise the fallback.
+func effectiveTTL(override, fallback int) int {
+	if override > 0 {
+		return override
+	}
+	return fallback
+}
+
 func applyDefaults(cfg *Config) {
 	if cfg.TTL == 0 {
 		cfg.TTL = DefaultTTL
@@ -168,8 +321,16 @@ func applyDefaults(cfg *Config) {
 func validate(cfg *Config) error {
 	var errs []string
 
-	if strings.TrimSpace(cfg.APIToken) == "" {
-		errs = append(errs, "api_token is required")
+	hetznerConfigured := strings.TrimSpace(cfg.APIToken) != ""
+	cf := cfg.Cloudflare
+	cloudflareConfigured := cf != nil && strings.TrimSpace(cf.APIToken) != ""
+
+	if !hetznerConfigured && !cloudflareConfigured {
+		errs = append(errs, "api_token is required (Hetzner) unless a cloudflare.api_token is configured")
+	}
+
+	if cf != nil && !cloudflareConfigured {
+		errs = append(errs, "cloudflare.api_token is required when a cloudflare block is present")
 	}
 
 	if strings.TrimSpace(cfg.Zone) == "" {
@@ -203,13 +364,19 @@ func validate(cfg *Config) error {
 	}
 
 	if cfg.Zone != "" && cfg.Record != "" {
-		record := strings.TrimRight(cfg.Record, ".")
-		zone := strings.TrimRight(cfg.Zone, ".")
-		if !strings.EqualFold(record, zone) && !strings.HasSuffix(strings.ToLower(record), "."+strings.ToLower(zone)) {
-			errs = append(errs, fmt.Sprintf("record %q must be within zone %q", cfg.Record, cfg.Zone))
+		errs = append(errs, validateRecordInZone(cfg.Record, cfg.Zone, "record", "zone")...)
+	}
+
+	if cloudflareConfigured {
+		cfZone := firstNonEmpty(cf.Zone, cfg.Zone)
+		cfRecord := firstNonEmpty(cf.Record, cfg.Record)
+
+		if cf.TTL != 0 && cf.TTL != 1 && cf.TTL < CloudflareMinTTL {
+			errs = append(errs, fmt.Sprintf("cloudflare.ttl must be 1 (automatic) or >= %d, got %d", CloudflareMinTTL, cf.TTL))
 		}
-		if strings.EqualFold(record, zone) {
-			errs = append(errs, fmt.Sprintf("record %q is the zone apex — use a subdomain (e.g. \"home.%s\")", cfg.Record, cfg.Zone))
+
+		if cfZone != "" && cfRecord != "" {
+			errs = append(errs, validateRecordInZone(cfRecord, cfZone, "cloudflare.record", "cloudflare.zone")...)
 		}
 	}
 
@@ -217,6 +384,21 @@ func validate(cfg *Config) error {
 		return errors.New(strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// validateRecordInZone checks that a record name is a subdomain of a zone.
+func validateRecordInZone(record, zone, recordLabel, zoneLabel string) []string {
+	record = strings.TrimRight(record, ".")
+	zone = strings.TrimRight(zone, ".")
+
+	var errs []string
+	if !strings.EqualFold(record, zone) && !strings.HasSuffix(strings.ToLower(record), "."+strings.ToLower(zone)) {
+		errs = append(errs, fmt.Sprintf("%s %q must be within %s %q", recordLabel, record, zoneLabel, zone))
+	}
+	if strings.EqualFold(record, zone) {
+		errs = append(errs, fmt.Sprintf("%s %q is the zone apex — use a subdomain (e.g. \"home.%s\")", recordLabel, record, zone))
+	}
+	return errs
 }
 
 func checkFilePermissions(path string) error {
@@ -247,8 +429,8 @@ func IsPrivateIP(ip net.IP) bool {
 		{IP: net.ParseIP("fc00::"), Mask: net.CIDRMask(7, 128)},
 		{IP: net.ParseIP("fe80::"), Mask: net.CIDRMask(10, 128)},
 	}
-	for _, net := range private {
-		if net.Contains(ip) {
+	for _, c := range private {
+		if c.Contains(ip) {
 			return true
 		}
 	}
